@@ -1,0 +1,14 @@
+{
+  "name": "welfare-proxy",
+  "version": "1.0.0",
+  "description": "배리어프리 복지 데모 - data.go.kr 인증키를 안전하게 보관하는 백엔드 프록시",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "fast-xml-parser": "^5.11.1"
+  }
+}
