@@ -179,7 +179,8 @@ app.get("/api/finance/jeonse-rate", async (req, res) => {
     url.searchParams.set("serviceKey", HF_SERVICE_KEY);
     url.searchParams.set("pageNo", req.query.pageNo || "1");
     url.searchParams.set("numOfRows", req.query.numOfRows || "20");
-    url.searchParams.set("dataType", "JSON"); // 이 API는 dataType 파라미터로 JSON을 직접 지원함(공식 문서 확인)
+    // ⚠️ dataType=JSON을 보내면 게이트웨이가 HTTP_ERROR(04)를 반환하는 것으로 확인되어 제거함.
+    //    파라미터 없이 요청하면 기본 XML로 응답이 오고, 아래에서 JSON 우선 시도 후 XML로 폴백해서 처리한다.
 
     const upstream = await fetch(url.toString());
     const text = await upstream.text();
