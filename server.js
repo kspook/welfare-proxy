@@ -91,6 +91,11 @@ app.get("/api/welfare/list", async (req, res) => {
     url.searchParams.set("numOfRows", req.query.numOfRows || "10");
     url.searchParams.set("srchKeyCode", req.query.srchKeyCode || "001"); // ⚠️ 필수! (001=제목,002=내용,003=제목+내용) - 공식 가이드로 확인됨
 
+    // ✅ 선택 조건 조회용 - 공식 가이드의 선택(옵션) 파라미터. 없으면 그냥 안 보낸다(=전체 조회).
+    if (req.query.lifeArray) url.searchParams.set("lifeArray", req.query.lifeArray);
+    if (req.query.trgterIndvdlArray) url.searchParams.set("trgterIndvdlArray", req.query.trgterIndvdlArray);
+    if (req.query.intrsThemaArray) url.searchParams.set("intrsThemaArray", req.query.intrsThemaArray);
+
     const upstream = await fetch(url.toString());
     const text = await upstream.text();
 
@@ -159,6 +164,48 @@ app.get("/api/welfare/detail", async (req, res) => {
     res.json(json);
   } catch (err) {
     res.status(502).json({ ok: false, message: "프록시 호출 실패", error: String(err) });
+  }
+});
+
+// 한국주택금융공사 전세자금대출 금리 정보 (data.go.kr, 기관코드 B551408) - 개인 대출이 아니라
+// 은행별 공개 금리 비교 데이터라 마이데이터 라이선스 문제 없이 바로 쓸 수 있다.
+const HF_BASE_URL = process.env.HF_BASE_URL || "https://apis.data.go.kr/B551408/rent-loan-rate-info";
+const HF_RATE_LIST_PATH = process.env.HF_RATE_LIST_PATH || "/rate-list";
+const HF_SERVICE_KEY = normalizeServiceKey(process.env.HF_SERVICE_KEY || SERVICE_KEY);
+
+app.get("/api/finance/jeonse-rate", async (req, res) => {
+  try {
+    const url = new URL(HF_BASE_URL + HF_RATE_LIST_PATH);
+    url.searchParams.set("serviceKey", HF_SERVICE_KEY);
+    url.searchParams.set("pageNo", req.query.pageNo || "1");
+    url.searchParams.set("numOfRows", req.query.numOfRows || "20");
+    url.searchParams.set("dataType", "JSON"); // 이 API는 dataType 파라미터로 JSON을 직접 지원함(공식 문서 확인)
+
+    const upstream = await fetch(url.toString());
+    const text = await upstream.text();
+
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({
+        ok: false,
+        status: upstream.status,
+        message: "상위 API가 오류를 반환했습니다.",
+        raw: text.slice(0, 2000),
+      });
+    }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      try {
+        json = xmlParser.parse(text);
+      } catch {
+        return res.status(502).json({ ok: false, message: "응답 파싱 실패", raw: text.slice(0, 1000) });
+      }
+    }
+    res.json(json);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
   }
 });
 
