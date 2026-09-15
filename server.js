@@ -173,6 +173,26 @@ const HF_BASE_URL = process.env.HF_BASE_URL || "https://apis.data.go.kr/B551408/
 const HF_RATE_LIST_PATH = process.env.HF_RATE_LIST_PATH || "/rate-list";
 const HF_SERVICE_KEY = normalizeServiceKey(process.env.HF_SERVICE_KEY || SERVICE_KEY);
 
+// data.go.kr 게이트웨이는 에러가 나도 HTTP 200으로 응답하면서 본문에만 에러를 담는 경우가
+// 있어서(OpenAPI_ServiceResponse/cmmMsgHeader 형태), status만으로는 실패를 못 잡는다.
+// 한국주택금융공사 API가 간헐적으로 이런 응답을 주는 것이 확인되어, 짧게 재시도한다.
+async function fetchWithRetry(url, maxRetries = 2, delayMs = 700) {
+  let lastText = "";
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const upstream = await fetch(url);
+    const text = await upstream.text();
+    lastText = text;
+    const looksLikeGatewayError = text.includes("OpenAPI_ServiceResponse");
+    if (upstream.ok && !looksLikeGatewayError) {
+      return { ok: true, text };
+    }
+    if (attempt < maxRetries) {
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  return { ok: false, text: lastText };
+}
+
 app.get("/api/finance/jeonse-rate", async (req, res) => {
   try {
     const url = new URL(HF_BASE_URL + HF_RATE_LIST_PATH);
@@ -182,14 +202,54 @@ app.get("/api/finance/jeonse-rate", async (req, res) => {
     // ⚠️ dataType=JSON을 보내면 게이트웨이가 HTTP_ERROR(04)를 반환하는 것으로 확인되어 제거함.
     //    파라미터 없이 요청하면 기본 XML로 응답이 오고, 아래에서 JSON 우선 시도 후 XML로 폴백해서 처리한다.
 
-    const upstream = await fetch(url.toString());
-    const text = await upstream.text();
+    const { ok, text } = await fetchWithRetry(url.toString());
 
-    if (!upstream.ok) {
-      return res.status(upstream.status).json({
+    if (!ok) {
+      return res.status(502).json({
         ok: false,
-        status: upstream.status,
-        message: "상위 API가 오류를 반환했습니다.",
+        message: "한국주택금융공사 API가 계속 오류를 반환하고 있습니다. 상대 기관 서버의 일시적 장애로 보이며, 잠시 후 다시 시도해 주세요.",
+        raw: text.slice(0, 2000),
+      });
+    }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      try {
+        json = xmlParser.parse(text);
+      } catch {
+        return res.status(502).json({ ok: false, message: "응답 파싱 실패", raw: text.slice(0, 1000) });
+      }
+    }
+    res.json(json);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
+  }
+});
+
+// 금융위원회_서민금융상품기본정보 (data.go.kr, 기관코드 1160100) - 상품 단위(금리/한도/대상/신청방법/문의처)
+const FIN_PRODUCT_BASE_URL =
+  process.env.FIN_PRODUCT_BASE_URL || "https://apis.data.go.kr/1160100/service/GetSmallLoanFinanceInstituteInfoService";
+const FIN_PRODUCT_OP_PATH = process.env.FIN_PRODUCT_OP_PATH || "/getOrdinaryFinanceInfo";
+const FIN_PRODUCT_SERVICE_KEY = normalizeServiceKey(process.env.FIN_PRODUCT_SERVICE_KEY || SERVICE_KEY);
+
+app.get("/api/finance/loan-products", async (req, res) => {
+  try {
+    const url = new URL(FIN_PRODUCT_BASE_URL + FIN_PRODUCT_OP_PATH);
+    url.searchParams.set("serviceKey", FIN_PRODUCT_SERVICE_KEY);
+    url.searchParams.set("pageNo", req.query.pageNo || "1");
+    url.searchParams.set("numOfRows", req.query.numOfRows || "20");
+    // 선택 필터 - 공식 가이드에 있는 파라미터만 있을 때만 전달 (기본은 전체 조회)
+    ["likeUsge", "likeTrgt", "irtCtg", "prdCtg", "likeFinPrdNm", "likeHdlInst", "prdExisYn"].forEach((k) => {
+      if (req.query[k]) url.searchParams.set(k, req.query[k]);
+    });
+
+    const { ok, text } = await fetchWithRetry(url.toString());
+    if (!ok) {
+      return res.status(502).json({
+        ok: false,
+        message: "서민금융상품 API가 계속 오류를 반환하고 있습니다. 잠시 후 다시 시도해 주세요.",
         raw: text.slice(0, 2000),
       });
     }
