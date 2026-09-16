@@ -95,6 +95,7 @@ app.get("/api/welfare/list", async (req, res) => {
     if (req.query.lifeArray) url.searchParams.set("lifeArray", req.query.lifeArray);
     if (req.query.trgterIndvdlArray) url.searchParams.set("trgterIndvdlArray", req.query.trgterIndvdlArray);
     if (req.query.intrsThemaArray) url.searchParams.set("intrsThemaArray", req.query.intrsThemaArray);
+    if (req.query.searchWrd) url.searchParams.set("searchWrd", req.query.searchWrd); // 자유 검색어 (예: "문화누리카드")
 
     const upstream = await fetch(url.toString());
     const text = await upstream.text();
@@ -269,6 +270,50 @@ app.get("/api/finance/loan-products", async (req, res) => {
     res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
   }
 });
+
+// 한국주택금융공사_디딤돌대출금리정보, 적격대출(보금자리론)금리 정보
+const DIDIMDOL_BASE_URL = process.env.DIDIMDOL_BASE_URL || "https://apis.data.go.kr/B551408/didimdol-loan-rate";
+const DIDIMDOL_OP_PATH = process.env.DIDIMDOL_OP_PATH || "/didimdol-info";
+const CONFORMING_BASE_URL = process.env.CONFORMING_BASE_URL || "https://apis.data.go.kr/B551408/conforming-loan-rate";
+const CONFORMING_OP_PATH = process.env.CONFORMING_OP_PATH || "/conforming-list";
+// 이 두 API도 B551408(한국주택금융공사) 소속이라 같은 인증키를 쓰되, data.go.kr에서
+// 데이터셋별로 별도 활용신청이 필요하다.
+const HF_LOAN_SERVICE_KEY = normalizeServiceKey(process.env.HF_LOAN_SERVICE_KEY || HF_SERVICE_KEY);
+
+async function proxyHfRateApi(baseUrl, opPath, req, res) {
+  try {
+    const url = new URL(baseUrl + opPath);
+    url.searchParams.set("serviceKey", HF_LOAN_SERVICE_KEY);
+    url.searchParams.set("pageNo", req.query.pageNo || "1");
+    url.searchParams.set("numOfRows", req.query.numOfRows || "20");
+
+    const { ok, text } = await fetchWithRetry(url.toString());
+    if (!ok) {
+      return res.status(502).json({
+        ok: false,
+        message: "한국주택금융공사 API가 계속 오류를 반환하고 있습니다. 잠시 후 다시 시도해 주세요.",
+        raw: text.slice(0, 2000),
+      });
+    }
+
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      try {
+        json = xmlParser.parse(text);
+      } catch {
+        return res.status(502).json({ ok: false, message: "응답 파싱 실패", raw: text.slice(0, 1000) });
+      }
+    }
+    res.json(json);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
+  }
+}
+
+app.get("/api/finance/didimdol-rate", (req, res) => proxyHfRateApi(DIDIMDOL_BASE_URL, DIDIMDOL_OP_PATH, req, res));
+app.get("/api/finance/conforming-rate", (req, res) => proxyHfRateApi(CONFORMING_BASE_URL, CONFORMING_OP_PATH, req, res));
 
 app.listen(PORT, () => {
   console.log(`[welfare-proxy] http://localhost:${PORT} 에서 실행 중`);
