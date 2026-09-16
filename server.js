@@ -16,6 +16,11 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const { XMLParser } = require("fast-xml-parser");
+const Anthropic = require("@anthropic-ai/sdk");
+
+const anthropic = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -314,6 +319,324 @@ async function proxyHfRateApi(baseUrl, opPath, req, res) {
 
 app.get("/api/finance/didimdol-rate", (req, res) => proxyHfRateApi(DIDIMDOL_BASE_URL, DIDIMDOL_OP_PATH, req, res));
 app.get("/api/finance/conforming-rate", (req, res) => proxyHfRateApi(CONFORMING_BASE_URL, CONFORMING_OP_PATH, req, res));
+
+// 한국주택금융공사_전세자금보증상품 추천서비스 (고객특성별 추천/월별금리/상세정보/지역별한도)
+const JEONSE_RCMD_BASE_URL = process.env.JEONSE_RCMD_BASE_URL || "https://apis.data.go.kr/B551408/jnse-rcmd-info-v2";
+const JEONSE_RCMD_SERVICE_KEY = normalizeServiceKey(process.env.JEONSE_RCMD_SERVICE_KEY || HF_SERVICE_KEY);
+
+async function proxyJeonseRcmdApi(opPath, extraParams, req, res) {
+  try {
+    const url = new URL(JEONSE_RCMD_BASE_URL + opPath);
+    url.searchParams.set("serviceKey", JEONSE_RCMD_SERVICE_KEY);
+    url.searchParams.set("dataType", "json"); // 공식 가이드에서 JSON 직접 지원 확인됨 (다른 API와 다르게 정상 동작)
+    Object.entries(extraParams).forEach(([k, v]) => {
+      if (v !== undefined && v !== null && v !== "") url.searchParams.set(k, v);
+    });
+
+    const { ok, text } = await fetchWithRetry(url.toString());
+    if (!ok) {
+      return res.status(502).json({
+        ok: false,
+        message: "전세자금보증상품 추천 API가 계속 오류를 반환하고 있습니다. 잠시 후 다시 시도해 주세요.",
+        raw: text.slice(0, 2000),
+      });
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      try {
+        json = xmlParser.parse(text);
+      } catch {
+        return res.status(502).json({ ok: false, message: "응답 파싱 실패", raw: text.slice(0, 1000) });
+      }
+    }
+    res.json(json);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
+  }
+}
+
+// 1) 고객 특성별 전세자금보증상품 추천
+app.get("/api/finance/jeonse-recommend", (req, res) => {
+  const { rentGrntAmt, mmrtAmt, trgtLwdgCd, age, weddStcd, myIncmAmt, myTotDebtAmt, ownHsCnt, grntPrmeActnDvcdCont, numOfRows, pageNo } = req.query;
+  proxyJeonseRcmdApi(
+    "/jnse-rcmd-list-v2",
+    { rentGrntAmt, mmrtAmt, trgtLwdgCd, age, weddStcd, myIncmAmt, myTotDebtAmt, ownHsCnt, grntPrmeActnDvcdCont, numOfRows: numOfRows || "20", pageNo: pageNo || "1" },
+    req,
+    res
+  );
+});
+
+// 2) 전세자금보증상품 월별 평균금리 조회
+app.get("/api/finance/jeonse-avg-rate", (req, res) => {
+  proxyJeonseRcmdApi("/jnse-grtd-loan-rat-list-v2", { loanYm: req.query.loanYm }, req, res);
+});
+
+// 3) 전세자금보증상품 상세정보 조회
+app.get("/api/finance/jeonse-product-detail", (req, res) => {
+  proxyJeonseRcmdApi("/jnse-prod-dtl-info-v2", { grntDvcd: req.query.grntDvcd }, req, res);
+});
+
+// 4) 전세자금보증상품 지역별 최대임차보증금액 조회
+app.get("/api/finance/jeonse-max-rent", (req, res) => {
+  proxyJeonseRcmdApi("/jnse-max-rent-amt-list-v2", { grntDvcd: req.query.grntDvcd }, req, res);
+});
+
+// 전세자금대출 고객 특성별 금리 정보 (일 1회 갱신)
+const JEONSE_DIM_BASE_URL = process.env.JEONSE_DIM_BASE_URL || "https://apis.data.go.kr/B551408/rent-loan-rate-multi-dimensional-info";
+const JEONSE_DIM_SERVICE_KEY = normalizeServiceKey(process.env.JEONSE_DIM_SERVICE_KEY || HF_SERVICE_KEY);
+
+app.get("/api/finance/jeonse-dim-rate", async (req, res) => {
+  try {
+    const url = new URL(JEONSE_DIM_BASE_URL + "/dimensional-list");
+    url.searchParams.set("serviceKey", JEONSE_DIM_SERVICE_KEY);
+    url.searchParams.set("numOfRows", req.query.numOfRows || "20");
+    url.searchParams.set("pageNo", req.query.pageNo || "1");
+    url.searchParams.set("loanYm", req.query.loanYm || "L3M");
+    ["cbGrd", "jobCd", "houseTycd", "age", "income", "debt"].forEach((k) => {
+      if (req.query[k]) url.searchParams.set(k, req.query[k]);
+    });
+
+    const { ok, text } = await fetchWithRetry(url.toString());
+    if (!ok) {
+      return res.status(502).json({
+        ok: false,
+        message: "전세자금대출 고객특성별 금리 API가 계속 오류를 반환하고 있습니다. 잠시 후 다시 시도해 주세요.",
+        raw: text.slice(0, 2000),
+      });
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      try {
+        json = xmlParser.parse(text);
+      } catch {
+        return res.status(502).json({ ok: false, message: "응답 파싱 실패", raw: text.slice(0, 1000) });
+      }
+    }
+    res.json(json);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
+  }
+});
+
+// =====================================================================
+// 자연어 질의응답 에이전트 (Claude API + Tool Use)
+// ---------------------------------------------------------------------
+// 핵심 원칙: Claude는 절대 숫자/사실을 지어내면 안 되고, 반드시 아래 도구로
+// 실제 API를 호출해서 받은 결과만 근거로 답해야 한다. 도구는 원본 JSON을
+// 그대로 돌려주고(가공 최소화), Claude가 그 안에서 필요한 내용을 골라 요약한다.
+// =====================================================================
+
+async function fetchJsonOrXml(urlString) {
+  const { ok, text } = await fetchWithRetry(urlString);
+  if (!ok) return { error: "상위 기관 API 호출에 실패했습니다.", raw: text.slice(0, 500) };
+  try {
+    return JSON.parse(text);
+  } catch {
+    try {
+      return xmlParser.parse(text);
+    } catch {
+      return { error: "응답 파싱 실패", raw: text.slice(0, 500) };
+    }
+  }
+}
+
+async function toolSearchWelfare({ keyword, lifeArray, trgterIndvdlArray, scope }) {
+  const scopes = scope === "central" || scope === "local" ? [scope] : ["central", "local"];
+  const out = {};
+  for (const s of scopes) {
+    const base = s === "central" ? BASE_URL_CENTRAL : BASE_URL_LOCAL;
+    const opPath = s === "central" ? OPERATIONS.central.list : OPERATIONS.local.list;
+    const key = s === "central" ? SERVICE_KEY : SERVICE_KEY_LOCAL;
+    const url = new URL(base + opPath);
+    url.searchParams.set("serviceKey", key);
+    url.searchParams.set("callTp", "L");
+    url.searchParams.set("pageNo", "1");
+    url.searchParams.set("numOfRows", "10");
+    url.searchParams.set("srchKeyCode", "001");
+    if (keyword) url.searchParams.set("searchWrd", keyword);
+    if (lifeArray) url.searchParams.set("lifeArray", lifeArray);
+    if (trgterIndvdlArray) url.searchParams.set("trgterIndvdlArray", trgterIndvdlArray);
+    out[s] = await fetchJsonOrXml(url.toString());
+  }
+  return out;
+}
+
+async function toolGetWelfareDetail({ servId, scope }) {
+  const base = scope === "local" ? BASE_URL_LOCAL : BASE_URL_CENTRAL;
+  const opPath = scope === "local" ? OPERATIONS.local.detail : OPERATIONS.central.detail;
+  const key = scope === "local" ? SERVICE_KEY_LOCAL : SERVICE_KEY;
+  const url = new URL(base + opPath);
+  url.searchParams.set("serviceKey", key);
+  url.searchParams.set("callTp", "D");
+  url.searchParams.set("servId", servId);
+  return fetchJsonOrXml(url.toString());
+}
+
+async function toolSearchFinanceProducts({ usage, keyword }) {
+  const url = new URL(FIN_PRODUCT_BASE_URL + FIN_PRODUCT_OP_PATH);
+  url.searchParams.set("serviceKey", FIN_PRODUCT_SERVICE_KEY);
+  url.searchParams.set("pageNo", "1");
+  url.searchParams.set("numOfRows", "10");
+  if (usage) url.searchParams.set("likeUsge", usage);
+  if (keyword) url.searchParams.set("likeFinPrdNm", keyword);
+  return fetchJsonOrXml(url.toString());
+}
+
+async function toolGetDidimdolRate() {
+  const url = new URL(DIDIMDOL_BASE_URL + DIDIMDOL_OP_PATH);
+  url.searchParams.set("serviceKey", HF_LOAN_SERVICE_KEY);
+  url.searchParams.set("pageNo", "1");
+  url.searchParams.set("numOfRows", "10");
+  return fetchJsonOrXml(url.toString());
+}
+
+async function toolGetJeonseBankRate() {
+  const url = new URL(HF_BASE_URL + HF_RATE_LIST_PATH);
+  url.searchParams.set("serviceKey", HF_SERVICE_KEY);
+  url.searchParams.set("pageNo", "1");
+  url.searchParams.set("numOfRows", "20");
+  return fetchJsonOrXml(url.toString());
+}
+
+const TOOLS = [
+  {
+    name: "search_welfare",
+    description:
+      "실제 정부 복지 서비스 목록을 조회한다(중앙부처+지자체). 이름 검색어나 생애주기/가구상황 코드로 필터링할 수 있다. 결과의 servId를 get_welfare_detail에 넘기면 더 자세한 정보를 볼 수 있다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        keyword: { type: "string", description: "복지 서비스 이름 검색어 (예: 문화누리카드, 아이돌봄)" },
+        lifeArray: { type: "string", description: "생애주기 코드 하나. 001영유아 002아동 003청소년 004청년 005중장년 006노년 007임신출산" },
+        trgterIndvdlArray: { type: "string", description: "가구상황 코드(콤마로 여러개 가능). 010다문화탈북민 020다자녀 030보훈대상자 040장애인 050저소득 060한부모조손" },
+        scope: { type: "string", enum: ["central", "local"], description: "중앙부처만/지자체만 보고 싶을 때만 지정, 없으면 둘 다 조회" },
+      },
+    },
+  },
+  {
+    name: "get_welfare_detail",
+    description: "search_welfare 결과에서 얻은 특정 복지 서비스 하나의 상세 정보(대상/선정기준/신청방법/문의처)를 조회한다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        servId: { type: "string", description: "search_welfare 결과의 servId 값" },
+        scope: { type: "string", enum: ["central", "local"] },
+      },
+      required: ["servId", "scope"],
+    },
+  },
+  {
+    name: "search_finance_products",
+    description: "서민금융 대출/저축 상품(금융위원회_서민금융상품기본정보)을 조회한다. 상품명/금리/한도/대상/신청방법이 나온다.",
+    input_schema: {
+      type: "object",
+      properties: {
+        usage: { type: "string", description: "대출 용도: 생계, 창업, 운영, 주거(전세·주택자금 포함), 학자금" },
+        keyword: { type: "string", description: "상품명 검색어 (예: 버팀목, 디딤돌)" },
+      },
+    },
+  },
+  {
+    name: "get_didimdol_rate",
+    description: "디딤돌대출(주택 구입자금) 최신 금리를 소득구간(2천/4천/6천만원 이하)별, 대출기간(10/15/20/30년)별로 조회한다.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "get_jeonse_bank_rate",
+    description: "전세자금대출의 은행별 평균 적용금리를 조회한다 (은행 전체 평균값, 특정 상품 금리 아님).",
+    input_schema: { type: "object", properties: {} },
+  },
+];
+
+async function executeTool(name, input) {
+  switch (name) {
+    case "search_welfare":
+      return toolSearchWelfare(input || {});
+    case "get_welfare_detail":
+      return toolGetWelfareDetail(input || {});
+    case "search_finance_products":
+      return toolSearchFinanceProducts(input || {});
+    case "get_didimdol_rate":
+      return toolGetDidimdolRate();
+    case "get_jeonse_bank_rate":
+      return toolGetJeonseBankRate();
+    default:
+      return { error: `알 수 없는 도구: ${name}` };
+  }
+}
+
+const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계층을 위한 "배리어프리 생활 에이전트"입니다.
+사용자의 질문에 답할 때는 반드시 제공된 도구(tool)를 사용해서 실제 정부·금융 데이터를 조회한 다음,
+그 결과 안에 있는 사실만 근거로 답하세요. 도구 결과에 없는 숫자나 조건을 지어내면 절대 안 됩니다.
+확실하지 않거나 도구 결과가 비어있으면 "확인이 더 필요합니다" 또는 "찾지 못했습니다"라고 솔직히 말하세요.
+답변은 한국어로, 소리 내어 읽었을 때 자연스럽도록 짧고 명확한 문장 여러 개로 작성하고,
+전문용어는 풀어서 설명하세요. 실제 신청은 이 앱이 대신해주지 않는다는 점을 필요하면 알려주세요.`;
+
+app.post("/api/agent/ask", async (req, res) => {
+  if (!anthropic) {
+    return res.status(500).json({ ok: false, message: "서버에 ANTHROPIC_API_KEY가 설정되지 않았습니다." });
+  }
+  const question = req.body && req.body.question;
+  if (!question || typeof question !== "string") {
+    return res.status(400).json({ ok: false, message: "question(질문)이 필요합니다." });
+  }
+
+  try {
+    const messages = [{ role: "user", content: question }];
+    const model = process.env.AGENT_MODEL || "claude-sonnet-5";
+
+    let response = await anthropic.messages.create({
+      model,
+      max_tokens: 1024,
+      system: AGENT_SYSTEM_PROMPT,
+      tools: TOOLS,
+      messages,
+    });
+
+    // 도구 호출 루프 (최대 4회 왕복)
+    for (let i = 0; i < 4; i++) {
+      const toolUse = response.content.find((c) => c.type === "tool_use");
+      if (!toolUse) break;
+
+      messages.push({ role: "assistant", content: response.content });
+
+      const result = await executeTool(toolUse.name, toolUse.input);
+      messages.push({
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result).slice(0, 8000),
+          },
+        ],
+      });
+
+      response = await anthropic.messages.create({
+        model,
+        max_tokens: 1024,
+        system: AGENT_SYSTEM_PROMPT,
+        tools: TOOLS,
+        messages,
+      });
+    }
+
+    const finalText = response.content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n")
+      .trim();
+
+    res.json({ ok: true, answer: finalText || "답변을 만들지 못했습니다. 다시 질문해 주세요." });
+  } catch (err) {
+    console.error("에이전트 오류:", err);
+    res.status(502).json({ ok: false, message: "AI 응답 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.", error: String(err) });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`[welfare-proxy] http://localhost:${PORT} 에서 실행 중`);
