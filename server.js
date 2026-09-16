@@ -597,24 +597,23 @@ app.post("/api/agent/ask", async (req, res) => {
       messages,
     });
 
-    // 도구 호출 루프 (최대 4회 왕복)
+    // 도구 호출 루프 (최대 4회 왕복) - 한 응답에 tool_use가 여러 개 있을 수 있어 전부 처리해야 한다.
     for (let i = 0; i < 4; i++) {
-      const toolUse = response.content.find((c) => c.type === "tool_use");
-      if (!toolUse) break;
+      const toolUses = response.content.filter((c) => c.type === "tool_use");
+      if (toolUses.length === 0) break;
 
       messages.push({ role: "assistant", content: response.content });
 
-      const result = await executeTool(toolUse.name, toolUse.input);
-      messages.push({
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: JSON.stringify(result).slice(0, 8000),
-          },
-        ],
-      });
+      const toolResults = [];
+      for (const toolUse of toolUses) {
+        const result = await executeTool(toolUse.name, toolUse.input);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: JSON.stringify(result).slice(0, 8000),
+        });
+      }
+      messages.push({ role: "user", content: toolResults });
 
       response = await anthropic.messages.create({
         model,
