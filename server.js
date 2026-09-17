@@ -16,11 +16,20 @@ require("dotenv").config();
 const express = require("express");
 const path = require("path");
 const { XMLParser } = require("fast-xml-parser");
-const Anthropic = require("@anthropic-ai/sdk");
 
-const anthropic = process.env.ANTHROPIC_API_KEY
-  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-  : null;
+// ⚠️ 이 모듈이 설치 안 됐거나 문제가 있어도 서버 전체(복지/금융 조회 등)가
+//    죽지 않도록 방어적으로 로드한다. 실패하면 AI 질의응답 기능만 비활성화된다.
+let Anthropic = null;
+let anthropicLoadError = null;
+try {
+  Anthropic = require("@anthropic-ai/sdk");
+} catch (err) {
+  anthropicLoadError = err;
+  console.error("⚠️ @anthropic-ai/sdk 로드 실패 - AI 질의응답 기능이 비활성화됩니다:", err.message);
+}
+
+const anthropic =
+  Anthropic && process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -600,7 +609,10 @@ function stripMarkdown(s) {
 
 app.post("/api/agent/ask", async (req, res) => {
   if (!anthropic) {
-    return res.status(500).json({ ok: false, message: "서버에 ANTHROPIC_API_KEY가 설정되지 않았습니다." });
+    const reason = anthropicLoadError
+      ? `SDK 로드 실패: ${anthropicLoadError.message}`
+      : "ANTHROPIC_API_KEY가 설정되지 않았습니다.";
+    return res.status(500).json({ ok: false, message: `AI 질의응답 기능을 쓸 수 없습니다 (${reason})` });
   }
   const question = req.body && req.body.question;
   if (!question || typeof question !== "string") {
@@ -613,7 +625,7 @@ app.post("/api/agent/ask", async (req, res) => {
 
     let response = await anthropic.messages.create({
       model,
-      max_tokens: 1024,
+      max_tokens: 2048,
       system: AGENT_SYSTEM_PROMPT,
       tools: TOOLS,
       messages,
@@ -639,7 +651,7 @@ app.post("/api/agent/ask", async (req, res) => {
 
       response = await anthropic.messages.create({
         model,
-        max_tokens: 1024,
+        max_tokens: 2048,
         system: AGENT_SYSTEM_PROMPT,
         tools: TOOLS,
         messages,
@@ -652,7 +664,14 @@ app.post("/api/agent/ask", async (req, res) => {
       .join("\n")
       .trim();
 
-    res.json({ ok: true, answer: stripMarkdown(finalText) || "답변을 만들지 못했습니다. 다시 질문해 주세요." });
+    // 토큰 한도로 답변이 중간에 끊긴 경우, 사용자가 "왜 갑자기 끝났지"라고 오해하지 않도록 알려준다.
+    const truncatedNote =
+      response.stop_reason === "max_tokens" ? "\n\n(답변이 길어서 여기서 요약을 마칩니다. 더 필요하면 구체적으로 다시 물어봐 주세요.)" : "";
+
+    res.json({
+      ok: true,
+      answer: (stripMarkdown(finalText) || "답변을 만들지 못했습니다. 다시 질문해 주세요.") + truncatedNote,
+    });
   } catch (err) {
     console.error("에이전트 오류:", err);
     res.status(502).json({ ok: false, message: "AI 응답 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.", error: String(err) });
