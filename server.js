@@ -465,7 +465,9 @@ async function toolSearchWelfare({ keyword, lifeArray, trgterIndvdlArray, scope 
     url.searchParams.set("callTp", "L");
     url.searchParams.set("pageNo", "1");
     url.searchParams.set("numOfRows", "10");
-    url.searchParams.set("srchKeyCode", "001");
+    // ⚠️ 001(제목만)이 아니라 003(제목+내용)으로 검색한다. "어르신"처럼 제목엔 없어도
+    // 설명 내용에는 있는 단어가 많아서, 동의어를 일일이 등록하는 대신 검색 범위 자체를 넓혔다.
+    url.searchParams.set("srchKeyCode", "003");
     if (keyword) url.searchParams.set("searchWrd", keyword);
     if (lifeArray) url.searchParams.set("lifeArray", lifeArray);
     if (trgterIndvdlArray) url.searchParams.set("trgterIndvdlArray", trgterIndvdlArray);
@@ -515,13 +517,26 @@ const TOOLS = [
   {
     name: "search_welfare",
     description:
-      "실제 정부 복지 서비스 목록을 조회한다(중앙부처+지자체). 이름 검색어나 생애주기/가구상황 코드로 필터링할 수 있다. 결과의 servId를 get_welfare_detail에 넘기면 더 자세한 정보를 볼 수 있다.",
+      "실제 정부 복지 서비스 목록을 조회한다(중앙부처+지자체). " +
+      "⚠️ 중요: keyword(제목/내용 텍스트 검색)는 그 단어가 프로그램 제목이나 설명에 '그대로' 들어있을 때만 찾아진다. " +
+      "'어르신', '아이', '장애인' 같은 대상을 물어보는 질문이면, keyword만 쓰지 말고 반드시 아래 lifeArray/trgterIndvdlArray " +
+      "코드도 같이 넣어라 (예: '강남구 어르신 복지' → keyword='강남구', lifeArray='006'). " +
+      "지역명(강남구 등)은 keyword로 넣고, 대상 계층은 코드로 넣는 식으로 같이 쓰는 게 가장 잘 찾아진다. " +
+      "결과의 servId를 get_welfare_detail에 넘기면 더 자세한 정보를 볼 수 있다.",
     input_schema: {
       type: "object",
       properties: {
-        keyword: { type: "string", description: "복지 서비스 이름 검색어 (예: 문화누리카드, 아이돌봄)" },
-        lifeArray: { type: "string", description: "생애주기 코드 하나. 001영유아 002아동 003청소년 004청년 005중장년 006노년 007임신출산" },
-        trgterIndvdlArray: { type: "string", description: "가구상황 코드(콤마로 여러개 가능). 010다문화탈북민 020다자녀 030보훈대상자 040장애인 050저소득 060한부모조손" },
+        keyword: { type: "string", description: "복지 서비스 이름/지역명 검색어 (예: 문화누리카드, 강남구, 아이돌봄)" },
+        lifeArray: {
+          type: "string",
+          description:
+            "생애주기 코드 하나. 001영유아 002아동 003청소년 004청년 005중장년 006노년(=어르신,노인,고령자) 007임신출산(=임산부)",
+        },
+        trgterIndvdlArray: {
+          type: "string",
+          description:
+            "가구상황 코드(콤마로 여러개 가능). 010다문화탈북민 020다자녀 030보훈대상자(=국가유공자) 040장애인 050저소득(=기초생활수급자,차상위) 060한부모조손",
+        },
         scope: { type: "string", enum: ["central", "local"], description: "중앙부처만/지자체만 보고 싶을 때만 지정, 없으면 둘 다 조회" },
       },
     },
@@ -582,6 +597,11 @@ const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계�
 
 [핵심 규칙 - 반드시 지켜야 함]
 1. 질문에 답하려면 반드시 제공된 도구(tool)를 먼저 사용해서 실제 정부·금융 데이터를 조회하세요.
+0. search_welfare를 쓸 때, 사용자가 특정 대상(어르신·아이·장애인·저소득 등)을 언급했다면 keyword 텍스트
+   검색만으로는 못 찾는 경우가 많습니다. 반드시 도구 설명에 있는 lifeArray/trgterIndvdlArray 코드도 같이 넣어
+   검색하세요. 첫 검색이 비어있거나 부족하면, 코드를 안 썼는지 확인하고 코드를 추가해서 한 번 더 검색해보세요.
+   또한 이미 찾았던 특정 프로그램에 대해 사용자가 "그거 자세히 알려줘"처럼 후속 질문을 하면, 그 프로그램
+   이름으로 keyword 검색을 다시 해서 servId를 찾은 다음 get_welfare_detail을 호출하세요.
 2. 답변의 모든 구체적인 사실(나이 기준, 금액, 조건, 신청방법, 연락처 등)은 오직 도구 결과 안에 있는 내용이어야 합니다.
    당신이 원래 알고 있던 배경지식으로 구체적인 숫자나 조건을 채워넣지 마세요. 도구 결과에 없으면
    "정확한 조건은 도구 조회 결과에 없어 확인이 더 필요합니다"라고 솔직히 말하세요.
@@ -618,9 +638,15 @@ app.post("/api/agent/ask", async (req, res) => {
   if (!question || typeof question !== "string") {
     return res.status(400).json({ ok: false, message: "question(질문)이 필요합니다." });
   }
+  // 이전 대화 기록 (클라이언트가 매번 통째로 보내는 방식 - 서버는 세션을 따로 저장하지 않는다)
+  const rawHistory = Array.isArray(req.body.history) ? req.body.history : [];
+  const history = rawHistory
+    .filter((h) => h && (h.role === "user" || h.role === "assistant") && typeof h.text === "string")
+    .slice(-20) // 너무 길어지지 않게 최근 20턴까지만
+    .map((h) => ({ role: h.role, content: h.text }));
 
   try {
-    const messages = [{ role: "user", content: question }];
+    const messages = [...history, { role: "user", content: question }];
     const model = process.env.AGENT_MODEL || "claude-sonnet-5";
 
     let response = await anthropic.messages.create({
@@ -658,11 +684,39 @@ app.post("/api/agent/ask", async (req, res) => {
       });
     }
 
-    const finalText = response.content
+    const bodyPart = response.content
       .filter((c) => c.type === "text")
       .map((c) => c.text)
       .join("\n")
       .trim();
+
+    // 추천 질문은 본문 생성과 같은 요청에 묶어서 지시하면(예: 특정 구분선 뒤에 붙이라는 식)
+    // 다른 형식 지시(마크다운 금지 등)와 섞여서 가끔 빠뜨리는 것으로 확인되어, 아예 별도의
+    // 짧고 단순한 요청으로 분리했다 - 이쪽이 훨씬 안정적으로 매번 나온다.
+    let followups = [];
+    try {
+      const followupRes = await anthropic.messages.create({
+        model,
+        max_tokens: 200,
+        system:
+          "방금 나눈 대화의 마지막 질문과 답변을 보고, 사용자가 이어서 물어보면 좋을 완결된 질문 문장을 " +
+          "정확히 2개 만들어라. 각 줄에 질문 하나씩만 쓰고, 번호·기호·설명·마크다운을 절대 붙이지 마라. " +
+          "그 외에는 아무것도 쓰지 마라. " +
+          "만약 이번 질문이 특정 시/군/구(예: 강남구, 수원시)에 관한 것이었다면, 두 질문 중 하나는 반드시 " +
+          "그 상위 시/도(예: 서울특별시, 경기도) 전체의 관련 정보도 확인하겠냐는 질문으로 만들어라.",
+        messages: [{ role: "user", content: `질문: ${question}\n\n답변: ${bodyPart}` }],
+      });
+      followups = followupRes.content
+        .filter((c) => c.type === "text")
+        .map((c) => c.text)
+        .join("\n")
+        .split("\n")
+        .map((s) => s.replace(/^[-•\d.\s]+/, "").trim())
+        .filter(Boolean)
+        .slice(0, 2);
+    } catch (err) {
+      console.warn("추천 질문 생성 실패(무시하고 진행):", err.message);
+    }
 
     // 토큰 한도로 답변이 중간에 끊긴 경우, 사용자가 "왜 갑자기 끝났지"라고 오해하지 않도록 알려준다.
     const truncatedNote =
@@ -670,7 +724,8 @@ app.post("/api/agent/ask", async (req, res) => {
 
     res.json({
       ok: true,
-      answer: (stripMarkdown(finalText) || "답변을 만들지 못했습니다. 다시 질문해 주세요.") + truncatedNote,
+      answer: (stripMarkdown(bodyPart) || "답변을 만들지 못했습니다. 다시 질문해 주세요.") + truncatedNote,
+      followups: followups.map(stripMarkdown),
     });
   } catch (err) {
     console.error("에이전트 오류:", err);
