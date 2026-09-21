@@ -487,6 +487,68 @@ async function toolGetWelfareDetail({ servId, scope }) {
   return fetchJsonOrXml(url.toString());
 }
 
+function decodeEntitiesPlain(s) {
+  if (typeof s !== "string") return undefined;
+  const t = s
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/\r\n|\r/g, "\n")
+    .trim();
+  return t || undefined;
+}
+
+// 상세조회 원본 응답(central: wantedDtl, local: wantedList.servList)을 사람이 읽을 텍스트로 변환.
+// 클라이언트(WelfareTaxService.formatDetail)와 같은 필드 매핑을 서버에서도 그대로 쓴다.
+function formatWelfareDetailPlain(raw, scope) {
+  const envelope = raw?.wantedDtl ?? raw?.wantedList ?? raw;
+  const row = Array.isArray(envelope?.servList) ? envelope.servList[0] : envelope?.servList ?? envelope;
+  if (!row) return "상세 정보를 찾지 못했습니다.";
+
+  const lines = [];
+  if (scope === "central") {
+    const target = decodeEntitiesPlain(row.tgtrDtlCn);
+    if (target) lines.push(`대상: ${target}`);
+    const criteria = decodeEntitiesPlain(row.slctCritCn);
+    if (criteria) lines.push(`선정기준: ${criteria}`);
+    const benefit = decodeEntitiesPlain(row.alwServCn);
+    if (benefit) lines.push(`지원내용: ${benefit}`);
+    const agency = decodeEntitiesPlain(row.jurMnofNm);
+    if (agency) lines.push(`담당기관: ${agency}`);
+  } else {
+    const digest = decodeEntitiesPlain(row.servDgst);
+    if (digest) lines.push(digest);
+    const target = decodeEntitiesPlain(row.trgterIndvdlNmArray);
+    if (target) lines.push(`대상: ${target}`);
+    const method = decodeEntitiesPlain(row.aplyMtdNm);
+    if (method) lines.push(`신청방법: ${method}`);
+    const agency = decodeEntitiesPlain(row.bizChrDeptNm);
+    if (agency) lines.push(`담당기관: ${agency}`);
+    const region = [decodeEntitiesPlain(row.ctpvNm), decodeEntitiesPlain(row.sggNm)].filter(Boolean).join(" ");
+    if (region) lines.push(`지역: ${region}`);
+  }
+  return lines.length > 0 ? lines.join("\n") : "상세 정보를 찾았지만 표시할 내용이 없습니다.";
+}
+
+// search_welfare 도구 결과(원본 central/local 응답)에서 화면에 탭 가능한 버튼으로 보여줄
+// {id, title, scope} 목록을 뽑는다. 최대 8개까지만.
+function extractWelfareItemsFromSearchResult(result) {
+  const items = [];
+  for (const scope of ["central", "local"]) {
+    const envelope = result?.[scope];
+    if (!envelope || envelope.error) continue;
+    const wanted = envelope?.wantedList ?? envelope;
+    const list = wanted?.servList;
+    const rows = Array.isArray(list) ? list : list ? [list] : [];
+    for (const row of rows) {
+      const title = decodeEntitiesPlain(row.servNm);
+      if (row.servId && title) items.push({ domain: "welfare", id: row.servId, title, scope });
+    }
+  }
+  return items.slice(0, 8);
+}
+
 async function toolSearchFinanceProducts({ usage, keyword }) {
   const url = new URL(FIN_PRODUCT_BASE_URL + FIN_PRODUCT_OP_PATH);
   url.searchParams.set("serviceKey", FIN_PRODUCT_SERVICE_KEY);
@@ -495,6 +557,23 @@ async function toolSearchFinanceProducts({ usage, keyword }) {
   if (usage) url.searchParams.set("likeUsge", usage);
   if (keyword) url.searchParams.set("likeFinPrdNm", keyword);
   return fetchJsonOrXml(url.toString());
+}
+
+// search_finance_products 결과에서 항목을 뽑는다. 이 API는 목록 조회 하나에 이미
+// 상세정보(대상/금리/한도/신청방법/문의처)가 다 들어있어서, 복지처럼 별도 상세조회가 필요 없다.
+// 그래서 원본 행(row)을 meta로 통째로 같이 보내, 클라이언트가 서버를 다시 안 거치고
+// 그 자리에서 바로 포맷해서 보여줄 수 있게 한다.
+function extractFinanceItemsFromSearchResult(result) {
+  const envelope = result?.response ?? result;
+  const body = envelope?.body ?? envelope;
+  const rows = body?.items?.item ?? body?.items ?? [];
+  const list = Array.isArray(rows) ? rows : rows ? [rows] : [];
+  return list.slice(0, 8).map((row, idx) => ({
+    domain: "finance",
+    id: `${decodeEntitiesPlain(row.finPrdNm) ?? "product"}_${idx}`,
+    title: decodeEntitiesPlain(row.finPrdNm) ?? "(상품명 확인 필요)",
+    meta: row,
+  }));
 }
 
 async function toolGetDidimdolRate() {
@@ -638,6 +717,22 @@ app.post("/api/agent/ask", async (req, res) => {
   if (!question || typeof question !== "string") {
     return res.status(400).json({ ok: false, message: "question(질문)이 필요합니다." });
   }
+
+  // "무엇이든 물어보기" 답변에 나온 항목을 탭했을 때 오는 특수 요청.
+  // LLM에게 다시 물어서 재검색시키는 대신, 정확한 servId로 바로 상세조회한다
+  // (더 빠르고, 재검색 실패 가능성이 없어 100% 정확하다).
+  const detailMatch = question.match(/^__DETAIL__:(central|local):(.+)$/);
+  if (detailMatch) {
+    const [, scope, servId] = detailMatch;
+    try {
+      const raw = await toolGetWelfareDetail({ servId, scope });
+      return res.json({ ok: true, answer: formatWelfareDetailPlain(raw, scope), followups: [], items: [] });
+    } catch (err) {
+      console.error("상세조회 단축 경로 오류:", err);
+      return res.status(502).json({ ok: false, message: "상세 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." });
+    }
+  }
+
   // 이전 대화 기록 (클라이언트가 매번 통째로 보내는 방식 - 서버는 세션을 따로 저장하지 않는다)
   const rawHistory = Array.isArray(req.body.history) ? req.body.history : [];
   const history = rawHistory
@@ -658,6 +753,7 @@ app.post("/api/agent/ask", async (req, res) => {
     });
 
     // 도구 호출 루프 (최대 4회 왕복) - 한 응답에 tool_use가 여러 개 있을 수 있어 전부 처리해야 한다.
+    let lastItems = []; // 가장 최근 검색 결과 - 화면에 탭 가능한 버튼으로 보여줄 목록 (복지/금융 공통)
     for (let i = 0; i < 4; i++) {
       const toolUses = response.content.filter((c) => c.type === "tool_use");
       if (toolUses.length === 0) break;
@@ -667,6 +763,13 @@ app.post("/api/agent/ask", async (req, res) => {
       const toolResults = [];
       for (const toolUse of toolUses) {
         const result = await executeTool(toolUse.name, toolUse.input);
+        if (toolUse.name === "search_welfare") {
+          const found = extractWelfareItemsFromSearchResult(result);
+          if (found.length > 0) lastItems = found;
+        } else if (toolUse.name === "search_finance_products") {
+          const found = extractFinanceItemsFromSearchResult(result);
+          if (found.length > 0) lastItems = found;
+        }
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
@@ -726,6 +829,7 @@ app.post("/api/agent/ask", async (req, res) => {
       ok: true,
       answer: (stripMarkdown(bodyPart) || "답변을 만들지 못했습니다. 다시 질문해 주세요.") + truncatedNote,
       followups: followups.map(stripMarkdown),
+      items: lastItems,
     });
   } catch (err) {
     console.error("에이전트 오류:", err);
