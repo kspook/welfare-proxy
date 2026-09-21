@@ -634,7 +634,11 @@ const TOOLS = [
   },
   {
     name: "search_finance_products",
-    description: "서민금융 대출/저축 상품(금융위원회_서민금융상품기본정보)을 조회한다. 상품명/금리/한도/대상/신청방법이 나온다.",
+    description:
+      "서민금융 대출/저축 상품(금융위원회_서민금융상품기본정보)을 조회한다. 상품명/금리/한도/대상/신청방법이 나온다. " +
+      "⚠️ 이 도구와 다른 금융 도구들은 정부·공공기관(HF 등) 상품만 다루며, SGI서울보증보험 같은 민간회사 상품이나 " +
+      "개별 은행이 자체적으로 파는 일반 주택담보대출은 포함하지 않는다. 그런 걸 물어보면, 이 앱은 공공데이터만 다뤄서 " +
+      "확인할 수 없다고 솔직히 말하고, SGI서울보증(sgic.co.kr)이나 해당 은행에 직접 확인해보라고 안내하라.",
     input_schema: {
       type: "object",
       properties: {
@@ -835,6 +839,104 @@ app.post("/api/agent/ask", async (req, res) => {
     console.error("에이전트 오류:", err);
     res.status(502).json({ ok: false, message: "AI 응답 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.", error: String(err) });
   }
+});
+
+// =====================================================================
+// 국토교통부_아파트 매매 실거래가 (부동산 거래신고법에 따른 실제 신고가격)
+// =====================================================================
+const APT_TRADE_BASE_URL = process.env.APT_TRADE_BASE_URL || "https://apis.data.go.kr/1613000/RTMSDataSvcAptTradeDev";
+const APT_TRADE_SERVICE_KEY = normalizeServiceKey(process.env.APT_TRADE_SERVICE_KEY || SERVICE_KEY);
+
+app.get("/api/finance/apt-trade", async (req, res) => {
+  try {
+    if (!req.query.lawdCd || !req.query.dealYmd) {
+      return res.status(400).json({ ok: false, message: "lawdCd(법정동코드 5자리)와 dealYmd(계약년월 6자리)가 필요합니다." });
+    }
+    const url = new URL(APT_TRADE_BASE_URL + "/getRTMSDataSvcAptTradeDev");
+    url.searchParams.set("serviceKey", APT_TRADE_SERVICE_KEY);
+    url.searchParams.set("LAWD_CD", req.query.lawdCd);
+    url.searchParams.set("DEAL_YMD", req.query.dealYmd);
+    url.searchParams.set("pageNo", req.query.pageNo || "1");
+    url.searchParams.set("numOfRows", req.query.numOfRows || "20");
+
+    const { ok, text } = await fetchWithRetry(url.toString());
+    if (!ok) {
+      return res.status(502).json({
+        ok: false,
+        message: "아파트 실거래가 API가 계속 오류를 반환하고 있습니다. 잠시 후 다시 시도해 주세요.",
+        raw: text.slice(0, 2000),
+      });
+    }
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      try {
+        json = xmlParser.parse(text);
+      } catch {
+        return res.status(502).json({ ok: false, message: "응답 파싱 실패", raw: text.slice(0, 1000) });
+      }
+    }
+    res.json(json);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "프록시 서버에서 상위 API 호출에 실패했습니다.", error: String(err) });
+  }
+});
+
+// =====================================================================
+// 법제처 "찾기쉬운 생활법령정보" 규제지역 안내 페이지 - 주기적 캐싱
+// robots.txt로 자동접근을 막지 않는 것을 확인했고(은행연합회와 다름),
+// 일반 서버렌더링 HTML이라 자바스크립트 실행 없이 바로 텍스트를 가져올 수 있다.
+// 숫자(LTV/DSR 비율)를 AI가 추측해서 뽑지 않고, 원문 텍스트 그대로 보여준다
+// (오독 위험 있는 자동 숫자추출 대신, 사람이 원문을 직접 읽고 판단하게 함).
+// =====================================================================
+const REGULATION_URL = "https://easylaw.go.kr/CSP/CnpClsMain.laf?popMenu=ov&csmSeq=649&ccfNo=1&cciNo=2&cnpClsNo=2";
+let regulationCache = { text: null, fetchedAt: null };
+
+function stripHtmlToText(html) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/[ \t]+/g, " ")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function refreshRegulationCache() {
+  try {
+    const res = await fetch(REGULATION_URL);
+    const html = await res.text();
+    regulationCache = { text: stripHtmlToText(html), fetchedAt: Date.now() };
+    console.log("[규제지역 캐시] 갱신 완료", new Date().toISOString());
+  } catch (err) {
+    console.warn("[규제지역 캐시] 갱신 실패:", err.message);
+  }
+}
+
+// 서버가 (Render 무료티어 특성상) 깨어날 때마다, 캐시가 없거나 24시간 넘었으면 그때 갱신한다.
+async function getRegulationInfo() {
+  const stale = !regulationCache.text || Date.now() - regulationCache.fetchedAt > 24 * 60 * 60 * 1000;
+  if (stale) await refreshRegulationCache();
+  return regulationCache;
+}
+
+app.get("/api/finance/regulation-info", async (req, res) => {
+  const cache = await getRegulationInfo();
+  if (!cache.text) {
+    return res.status(503).json({ ok: false, message: "규제지역 정보를 지금은 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." });
+  }
+  res.json({ ok: true, text: cache.text, fetchedAt: cache.fetchedAt, sourceUrl: REGULATION_URL });
 });
 
 app.listen(PORT, () => {
