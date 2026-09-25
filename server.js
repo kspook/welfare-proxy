@@ -634,6 +634,19 @@ const FIXED_FACTS = [
     lastVerified: "2026-01",
   },
   {
+    id: "jeonse-guarantor-comparison",
+    keywords: ["HUG", "SGI", "서울보증", "주택도시보증", "보증기관", "전세보증 비교", "전세보증보험"],
+    title: "전세자금보증 3개 기관(HF·HUG·SGI) 비교",
+    content:
+      "전세자금대출에는 보증기관이 필요한데, 대표적으로 HF(한국주택금융공사)·HUG(주택도시보증공사)·SGI(서울보증보험) 세 곳이 있습니다. " +
+      "이 앱은 HF만 실제로 연동되어 있고, HUG·SGI는 API가 없어 직접 조회는 안 됩니다. 일반적으로: " +
+      "HF는 공공기관으로 보증료가 저렴한 편이지만 소득증빙이 필수라 학생·프리랜서는 이용이 어려울 수 있습니다. " +
+      "HUG도 공공기관이며 소득증빙 부담이 적어 사회초년생·프리랜서에게 상대적으로 유리하고, 소득보다 집의 안전성 위주로 심사합니다(hug.or.kr). " +
+      "SGI는 민간 보증회사로 가입조건이 관대한 편이지만 보증료가 가장 비싸고, HF·HUG의 한도를 넘는 고액 전세나 법인 명의 계약의 대안으로 자주 쓰입니다(sgic.co.kr). " +
+      "정확한 보증한도·보증료율은 기관과 시기마다 달라, 반드시 해당 기관 홈페이지나 은행 창구에서 확인하세요.",
+    lastVerified: "2026-09",
+  },
+  {
     id: "veteran-transport",
     keywords: ["국가유공자 교통", "보훈대상자 교통", "국가유공자 지하철"],
     title: "국가유공자(보훈대상자) 교통 지원",
@@ -991,59 +1004,81 @@ app.get("/api/finance/apt-trade", async (req, res) => {
 });
 
 // =====================================================================
-// 법제처 "찾기쉬운 생활법령정보" 규제지역 안내 페이지 - 주기적 캐싱
-// robots.txt로 자동접근을 막지 않는 것을 확인했고(은행연합회와 다름),
-// 일반 서버렌더링 HTML이라 자바스크립트 실행 없이 바로 텍스트를 가져올 수 있다.
-// 숫자(LTV/DSR 비율)를 AI가 추측해서 뽑지 않고, 원문 텍스트 그대로 보여준다
-// (오독 위험 있는 자동 숫자추출 대신, 사람이 원문을 직접 읽고 판단하게 함).
+// AI 리서치 캐시 - 공식 API가 없거나(SGI/HUG), 숫자가 너무 자주 바뀌어서(LTV·DSR 규제)
+// 우리가 직접 고정값으로 넣기 위험한 주제를, Claude에게 실제 웹검색을 시켜서 조사하고
+// 그 결과를 캐싱해둔다. 한 달에 한 번 자동 갱신하고(상황 보고 주기 단축 가능),
+// "AI가 웹검색으로 조사한 참고 정보"라는 출처와 조사 시각을 항상 같이 보여준다.
+// ⚠️ 여전히 "합격/불합격 판정"은 하지 않는다 - 매달 갱신해도 그 사이 정책이 바뀔 수
+// 있어, 숫자 하나 잘못 판정하면 실질적 피해로 이어질 수 있기 때문이다.
 // =====================================================================
-const REGULATION_URL = "https://easylaw.go.kr/CSP/CnpClsMain.laf?popMenu=ov&csmSeq=649&ccfNo=1&cciNo=2&cnpClsNo=2";
-let regulationCache = { text: null, fetchedAt: null };
+const RESEARCH_REFRESH_DAYS = 30; // 상황 보고 주기를 줄이고 싶으면 이 숫자만 줄이면 된다.
 
-function stripHtmlToText(html) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/[ \t]+/g, " ")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
+const RESEARCH_TOPICS = {
+  "mortgage-regulation": {
+    label: "주택담보대출 LTV·DTI·DSR 규제 현황",
+    prompt:
+      "실제 웹검색을 통해 대한민국의 2026년 현재 주택담보대출 LTV·DTI·DSR 규제 현황을 조사해서 정리해줘. " +
+      "규제지역/비규제지역별 LTV 비율, 무주택자/1주택자/다주택자별 차이, 최근 1년 내 정책 변경 이력, " +
+      "주택가격 구간별 절대 한도(있다면)를 포함해서 알려줘. 정확한 출처와 발표일도 같이 밝혀줘. " +
+      "마크다운 문법은 쓰지 말고 평범한 문장으로 답해줘.",
+  },
+  "jeonse-guarantee-alt": {
+    label: "SGI서울보증·HUG 전세보증 상품 정보",
+    prompt:
+      "실제 웹검색을 통해 SGI서울보증의 전세금안심대출보증과 주택도시보증공사(HUG)의 전세보증금반환보증 " +
+      "상품에 대해 조사해서 정리해줘. 각각의 대상, 보증한도, 보증료율, 신청방법, 문의처를 포함해줘. " +
+      "정확한 출처도 같이 밝혀줘. 마크다운 문법은 쓰지 말고 평범한 문장으로 답해줘.",
+  },
+};
 
-async function refreshRegulationCache() {
+const researchCache = {}; // { [topicId]: { text, fetchedAt } }
+
+async function refreshResearchTopic(topicId) {
+  const topic = RESEARCH_TOPICS[topicId];
+  if (!topic || !anthropic) return;
   try {
-    const res = await fetch(REGULATION_URL);
-    const html = await res.text();
-    regulationCache = { text: stripHtmlToText(html), fetchedAt: Date.now() };
-    console.log("[규제지역 캐시] 갱신 완료", new Date().toISOString());
+    const model = process.env.AGENT_MODEL || "claude-sonnet-5";
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: 2048,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{ role: "user", content: topic.prompt }],
+    });
+    const text = response.content
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join("\n")
+      .trim();
+    researchCache[topicId] = { text: stripMarkdown(text), fetchedAt: Date.now() };
+    console.log(`[리서치 캐시] "${topic.label}" 갱신 완료`, new Date().toISOString());
   } catch (err) {
-    console.warn("[규제지역 캐시] 갱신 실패:", err.message);
+    console.warn(`[리서치 캐시] "${topic.label}" 갱신 실패:`, err.message);
   }
 }
 
-// 서버가 (Render 무료티어 특성상) 깨어날 때마다, 캐시가 없거나 24시간 넘었으면 그때 갱신한다.
-async function getRegulationInfo() {
-  const stale = !regulationCache.text || Date.now() - regulationCache.fetchedAt > 24 * 60 * 60 * 1000;
-  if (stale) await refreshRegulationCache();
-  return regulationCache;
+async function getResearchTopic(topicId) {
+  const cache = researchCache[topicId];
+  const stale = !cache || Date.now() - cache.fetchedAt > RESEARCH_REFRESH_DAYS * 24 * 60 * 60 * 1000;
+  if (stale) await refreshResearchTopic(topicId);
+  return researchCache[topicId];
 }
 
-app.get("/api/finance/regulation-info", async (req, res) => {
-  const cache = await getRegulationInfo();
-  if (!cache.text) {
-    return res.status(503).json({ ok: false, message: "규제지역 정보를 지금은 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." });
+app.get("/api/research/:topicId", async (req, res) => {
+  const topicId = req.params.topicId;
+  if (!RESEARCH_TOPICS[topicId]) {
+    return res.status(404).json({ ok: false, message: "알 수 없는 주제입니다." });
   }
-  res.json({ ok: true, text: cache.text, fetchedAt: cache.fetchedAt, sourceUrl: REGULATION_URL });
+  const cache = await getResearchTopic(topicId);
+  if (!cache || !cache.text) {
+    return res.status(503).json({ ok: false, message: "지금은 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." });
+  }
+  res.json({
+    ok: true,
+    topic: RESEARCH_TOPICS[topicId].label,
+    text: cache.text,
+    fetchedAt: cache.fetchedAt,
+    refreshDays: RESEARCH_REFRESH_DAYS,
+  });
 });
 
 // 고정 정보 DB를 일반 REST로도 노출 - "찾아보기" 화면 등 AI 에이전트가 아닌
