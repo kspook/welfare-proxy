@@ -85,7 +85,8 @@ if (!SERVICE_KEY) {
 }
 
 app.use(express.static(path.join(__dirname, "public")));
-app.use(express.json());
+// 기본값(100KB)으로는 사진 첨부(base64로 변환하면 용량이 꽤 커짐) 요청이 거부되어 늘렸다.
+app.use(express.json({ limit: "15mb" }));
 
 /**
  * 프론트엔드는 이 엔드포인트만 호출한다: /api/welfare/list?scope=central&pageNo=1&numOfRows=10
