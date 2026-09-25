@@ -592,6 +592,62 @@ async function toolGetJeonseBankRate() {
   return fetchJsonOrXml(url.toString());
 }
 
+// =====================================================================
+// 앱 자체 고정 정보 DB - "65세 이상 지하철 무임승차"처럼 개별 신청 프로그램이
+// 아니라 오래전부터 시행 중인 보편적 제도라, 복지서비스 API 카탈로그에는 잘 안
+// 잡히지만 실생활에서 자주 물어보는 정보들. 여기 내용은 우리가 직접 확인해서
+// 넣은 것이라(Claude의 즉석 기억이 아님) 더 신뢰할 수 있다. 그래도 세부 조건은
+// 계속 바뀔 수 있어 "최종 확인일"을 꼭 표시하고, 정확한 확인은 관할 기관에 안내한다.
+// =====================================================================
+const FIXED_FACTS = [
+  {
+    id: "subway-senior-free",
+    keywords: ["지하철", "전철", "도시철도", "경로우대", "노인 교통", "65세 교통", "노인 지하철"],
+    title: "65세 이상 지하철(도시철도) 무임승차",
+    content:
+      "만 65세 이상 어르신은 노인복지법상 경로우대 제도에 따라 전국 대부분의 지하철·도시철도를 무료로 이용할 수 있습니다. " +
+      "역 창구에서 신분증(주민등록증 등)을 제시하면 바로 무임 승차권을 받을 수 있고, 자주 이용하신다면 관할 구청·주민센터에서 " +
+      "우대용 교통카드(예: 어르신 교통카드)를 발급받아 편하게 쓰실 수도 있습니다. " +
+      "코레일 일반열차(무궁화호 등)도 일부 할인이 있습니다. " +
+      "다만 신분당선처럼 민자로 운영되는 일부 노선은 무임 적용이 안 되거나 조건이 다를 수 있어, 이용 전 해당 노선에 확인하는 것이 좋습니다.",
+    lastVerified: "2026-01",
+  },
+  {
+    id: "disabled-transport-discount",
+    keywords: ["장애인 교통", "장애인 지하철", "장애인 버스 할인", "장애인 통행료", "장애인 고속도로"],
+    title: "장애인등록증(복지카드) 소지자 교통 할인·면제",
+    content:
+      "장애인등록증(복지카드)이 있으면 지하철·도시철도 무임승차, 철도(KTX·새마을·무궁화 등) 할인, 고속도로 통행료 할인 등 " +
+      "다양한 교통 혜택을 받을 수 있습니다. 장애 정도(심한 장애/심하지 않은 장애)나 지역에 따라 적용 범위와 할인율이 다를 수 있어, " +
+      "정확한 내용은 관할 구청 장애인복지 담당 부서나 한국장애인복지관에 문의하시는 것이 가장 정확합니다.",
+    lastVerified: "2026-01",
+  },
+  {
+    id: "senior-culture-discount",
+    keywords: ["경로우대 할인", "고궁 무료", "박물관 무료 노인", "노인 문화시설"],
+    title: "경로우대(65세 이상) 문화시설 할인·무료입장",
+    content:
+      "만 65세 이상이면 고궁(경복궁 등), 능원, 국공립박물관·미술관 등 국가에서 운영하는 문화시설 대부분을 무료 또는 할인된 " +
+      "요금으로 이용할 수 있습니다. 입장 시 신분증을 제시하면 됩니다. 시설마다 세부 기준이 다를 수 있어, 방문 전 해당 시설 " +
+      "홈페이지에서 한 번 확인하시는 것을 권해드립니다.",
+    lastVerified: "2026-01",
+  },
+  {
+    id: "veteran-transport",
+    keywords: ["국가유공자 교통", "보훈대상자 교통", "국가유공자 지하철"],
+    title: "국가유공자(보훈대상자) 교통 지원",
+    content:
+      "국가유공자로 등록되어 있으면 지하철 무임승차, 철도 할인 등 대중교통 관련 혜택을 받을 수 있습니다. 정확한 대상과 " +
+      "할인율은 보훈 등급에 따라 다르므로, 관할 보훈(지)청이나 국가보훈부(1577-0606)에 문의하시는 것이 정확합니다.",
+    lastVerified: "2026-01",
+  },
+];
+
+function searchFixedFacts(query) {
+  const q = (query || "").toLowerCase();
+  return FIXED_FACTS.filter((f) => f.keywords.some((k) => q.includes(k.toLowerCase())));
+}
+
 const TOOLS = [
   {
     name: "search_welfare",
@@ -657,6 +713,18 @@ const TOOLS = [
     description: "전세자금대출의 은행별 평균 적용금리를 조회한다 (은행 전체 평균값, 특정 상품 금리 아님).",
     input_schema: { type: "object", properties: {} },
   },
+  {
+    name: "search_fixed_facts",
+    description:
+      "이 앱이 직접 확인해서 등록해둔 고정 정보 DB를 검색한다. '65세 이상 지하철 무임승차'처럼 개별 신청 " +
+      "프로그램이 아니라 오래전부터 시행 중인 보편적 제도라 search_welfare로는 안 잡히는 정보들이 여기 있다. " +
+      "search_welfare에서 결과가 없거나 부족했다면, 바로 배경지식으로 넘어가지 말고 반드시 이 도구를 먼저 시도하라.",
+    input_schema: {
+      type: "object",
+      properties: { query: { type: "string", description: "사용자 질문 원문 또는 핵심 키워드" } },
+      required: ["query"],
+    },
+  },
 ];
 
 async function executeTool(name, input) {
@@ -671,6 +739,12 @@ async function executeTool(name, input) {
       return toolGetDidimdolRate();
     case "get_jeonse_bank_rate":
       return toolGetJeonseBankRate();
+    case "search_fixed_facts": {
+      const matches = searchFixedFacts((input && input.query) || "");
+      return matches.length > 0
+        ? { found: true, facts: matches.map(({ title, content, lastVerified }) => ({ title, content, lastVerified })) }
+        : { found: false };
+    }
     default:
       return { error: `알 수 없는 도구: ${name}` };
   }
@@ -679,7 +753,15 @@ async function executeTool(name, input) {
 const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계층을 위한 "배리어프리 생활 에이전트"입니다.
 
 [핵심 규칙 - 반드시 지켜야 함]
-1. 질문에 답하려면 반드시 제공된 도구(tool)를 먼저 사용해서 실제 정부·금융 데이터를 조회하세요.
+1. "복지/대출/금리가 어떻게 되나요" 같이 실제 정부·금융 사실을 새로 찾아야 하는 질문이면,
+   반드시 제공된 도구(tool)를 먼저 사용해서 조회하세요.
+1-1. 반면 사용자가 문자메시지·사진·문서 내용을 주면서 "이게 뭐야, 설명해줘, 해석해줘"라고 묻는 경우는
+   도구가 필요 없습니다. 그 내용을 그대로 읽고 이해하기 쉽게 설명하면 됩니다. 다만 그 내용 안에 특정
+   복지·금융 상품 이름이 나와서 더 찾아볼 필요가 있으면 그때는 도구를 추가로 써도 됩니다.
+1-2. 문자메시지·문서에 "링크를 눌러 서류를 제출하라", "개인정보를 입력하라", "인증번호를 알려달라" 같은
+   내용이 있으면, 내용 설명과 함께 "문자 속 링크를 직접 누르기보다, 진짜인지 의심되면 카드 뒷면이나
+   공식 홈페이지에 있는 번호로 그 기관에 직접 전화해서 확인해보라"는 주의사항을 반드시 같이 안내하세요.
+   장애인·고령자가 이런 문자 사기(스미싱)의 표적이 되는 경우가 많습니다.
 0. search_welfare를 쓸 때, 사용자가 특정 대상(어르신·아이·장애인·저소득 등)을 언급했다면 keyword 텍스트
    검색만으로는 못 찾는 경우가 많습니다. 반드시 도구 설명에 있는 lifeArray/trgterIndvdlArray 코드도 같이 넣어
    검색하세요. 첫 검색이 비어있거나 부족하면, 코드를 안 썼는지 확인하고 코드를 추가해서 한 번 더 검색해보세요.
@@ -687,12 +769,13 @@ const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계�
    이름으로 keyword 검색을 다시 해서 servId를 찾은 다음 get_welfare_detail을 호출하세요.
 2. 답변의 구체적인 사실(정확한 금액, 소득/나이 기준, 신청기한, 연락처 등)은 원칙적으로 도구 결과 안에 있는
    내용이어야 합니다. 당신이 원래 알고 있던 배경지식으로 이런 구체적인 숫자·조건을 지어내지 마세요.
-2-1. 다만, 도구로 검색했는데 결과가 없거나(예: "65세 이상 지하철 무임승차"처럼 개별 신청 프로그램이 아니라
-   오래전부터 시행 중인 보편적 제도라 이 앱의 복지서비스 카탈로그에 등록 안 되어 있는 경우), 질문이 애초에
-   이 앱의 도구로 답하기 어려운 일반 상식/개념 질문이라면, 당신이 원래 알고 있는 내용으로 답해도 됩니다.
-   단, 이 경우 반드시 "이 내용은 실제 데이터베이스 조회 결과가 아니라 일반적으로 알려진 정보입니다"라고
-   답변 안에 명확히 구분해서 밝히세요. 정확한 세부 조건(정확한 소득기준, 최신 금액 등)까지는 확신하지 말고,
-   필요하면 관련 기관에 직접 확인하라고 안내하세요.
+2-1. search_welfare/search_finance 같은 정부API 도구로 검색했는데 결과가 없다면, 곧바로 배경지식으로
+   넘어가지 말고 반드시 먼저 search_fixed_facts(이 앱이 직접 확인해서 등록해둔 고정 정보 DB)를 시도하세요.
+   거기서 찾으면 그 내용 그대로 답하고 "이 앱이 확인한 정보"라는 출처를 밝히세요(최종 확인일도 같이).
+2-2. search_fixed_facts에서도 못 찾았고, 질문이 애초에 이 앱의 도구로 답하기 어려운 일반 상식/개념
+   질문이라면, 그때만 당신이 원래 알고 있는 내용으로 답해도 됩니다. 단, 이 경우 반드시 "이 내용은 실제
+   데이터베이스 조회 결과가 아니라 일반적으로 알려진 정보입니다"라고 답변 안에 명확히 구분해서 밝히세요.
+   정확한 세부 조건(정확한 소득기준, 최신 금액 등)까지는 확신하지 말고, 관련 기관에 직접 확인하라고 안내하세요.
 3. 도구 결과가 비어있거나 오류이면 (2-1의 일반 상식 답변이 아닌 이상) 지어내지 말고 실패했다고 말하세요.
 
 [출력 형식 - 반드시 지켜야 함]
@@ -960,6 +1043,14 @@ app.get("/api/finance/regulation-info", async (req, res) => {
     return res.status(503).json({ ok: false, message: "규제지역 정보를 지금은 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." });
   }
   res.json({ ok: true, text: cache.text, fetchedAt: cache.fetchedAt, sourceUrl: REGULATION_URL });
+});
+
+// 고정 정보 DB를 일반 REST로도 노출 - "찾아보기" 화면 등 AI 에이전트가 아닌
+// 곳에서도 같은 데이터를 재사용할 수 있게 한다.
+app.get("/api/facts/fixed", (req, res) => {
+  const q = req.query.q;
+  const list = q ? searchFixedFacts(q) : FIXED_FACTS;
+  res.json({ ok: true, facts: list.map(({ id, title, content, lastVerified }) => ({ id, title, content, lastVerified })) });
 });
 
 app.listen(PORT, () => {
