@@ -719,13 +719,37 @@ const TOOLS = [
   },
   {
     name: "get_didimdol_rate",
-    description: "디딤돌대출(주택 구입자금) 최신 금리를 소득구간(2천/4천/6천만원 이하)별, 대출기간(10/15/20/30년)별로 조회한다.",
+    description:
+      "주택구입자금 대출(디딤돌대출, 무주택 서민 대상 정책 대출) 최신 금리를 소득구간(2천/4천/6천만원 이하)별, " +
+      "대출기간(10/15/20/30년)별로 조회한다. ⚠️ 디딤돌대출은 '주택담보대출'의 한 종류(정책성 저리 상품)이며, " +
+      "전세자금대출·생계자금·창업자금·학자금과 나란한 별개의 대출 목적이 아니다. 사용자가 '주택구입자금' " +
+      "또는 '주택담보대출'을 물어보면 이 도구로 답하되, 일반 시중은행 자체 주택담보대출 금리는 공공데이터가 " +
+      "없어 이 도구로 조회 안 됨을 함께 밝혀라.",
     input_schema: { type: "object", properties: {} },
   },
   {
     name: "get_jeonse_bank_rate",
     description: "전세자금대출의 은행별 평균 적용금리를 조회한다 (은행 전체 평균값, 특정 상품 금리 아님).",
     input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "search_public_benefits",
+    description:
+      "행정안전부_정부24의 '공공서비스(혜택 알리미)' 정보를 조회한다. search_welfare(보건복지부 복지서비스, " +
+      "중앙부처+지자체)와는 다른 별도 카탈로그이며, 여기서는 주로 '교육청'이나 '공공기관'이 제공하는 혜택을 " +
+      "찾을 때 쓴다(교육급여, 급식비 지원, 공단 자체 지원사업 등 search_welfare에 안 잡히는 것들). " +
+      "중앙부처·지자체 복지는 이미 search_welfare로 찾을 수 있으니 중복 조회하지 마라.",
+    input_schema: {
+      type: "object",
+      properties: {
+        keyword: { type: "string", description: "서비스명 검색어" },
+        orgType: {
+          type: "string",
+          enum: ["교육청", "공공기관"],
+          description: "소관기관 유형. 기본은 교육청이며, 공공기관 혜택이 필요하면 '공공기관'으로 지정",
+        },
+      },
+    },
   },
   {
     name: "search_fixed_facts",
@@ -753,6 +777,8 @@ async function executeTool(name, input) {
       return toolGetDidimdolRate();
     case "get_jeonse_bank_rate":
       return toolGetJeonseBankRate();
+    case "search_public_benefits":
+      return toolSearchPublicBenefits(input || {});
     case "search_fixed_facts": {
       const matches = searchFixedFacts((input && input.query) || "");
       return matches.length > 0
@@ -788,10 +814,13 @@ const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계�
 0-2. 이 앱에는 대화형 AI 화면 외에, 화면 우측 상단 "찾아보기"로 들어가면 조건을 선택해서 직접 찾아보거나
    (복지), 전세보증 맞춤 추천/LTV·DTI·DSR 계산기 같은 것을 쓸 수 있는 화면(금융)이 따로 있습니다.
    복지 답변 끝에는 "찾아보기 화면에서 조건별로 더 자세히 검색할 수 있다"고 안내하세요.
-   대출 한도나 LTV·DTI·DSR 계산이 필요한 질문이면, 답변 끝에 정확히 "LTV·DTI·DSR 계산기"라는 문구를
-   포함해서 그걸 써보라고 안내하세요 (예: "정확한 숫자는 이 앱의 LTV·DTI·DSR 계산기를 써보시면 계산해드려요").
-   전세자금 보증상품을 개인 조건에 맞춰 추천받고 싶어하는 질문이면, 답변 끝에 정확히 "전세보증 맞춤 추천"
-   이라는 문구를 포함해서 그걸 써보라고 안내하세요. 이 정확한 문구가 있어야 화면에 바로가기 버튼이 뜹니다.
+   ⚠️ 중요: "LTV·DTI·DSR 계산기"라는 문구는 사용자가 물어본 게 "주택구입/주택담보대출"이라고
+   이미 명확한 경우에만 쓰세요. "대출한도 알려줘"처럼 용도가 아직 안 정해져서 먼저 "주택구입자금인지
+   전세자금인지 생계자금인지" 같은 확인 질문을 하는 중이라면, 그 확인 질문 답변 안에서는 이 문구를
+   절대 쓰지 마세요 (사용자가 주택담보대출이라고 답하면, 그 다음 답변에서만 쓰세요). 이 문구가 있으면
+   화면에 "지금 바로 계산기 열기" 버튼이 뜨는데, 아직 용도가 안 정해진 상태에서 뜨면 사용자가 헷갈립니다.
+   같은 이유로 "전세보증 맞춤 추천"이라는 문구도, 사용자가 전세자금 보증상품을 원한다는 게 확정된
+   경우에만 쓰세요.
 2. 답변의 구체적인 사실(정확한 금액, 소득/나이 기준, 신청기한, 연락처 등)은 원칙적으로 도구 결과 안에 있는
    내용이어야 합니다. 당신이 원래 알고 있던 배경지식으로 이런 구체적인 숫자·조건을 지어내지 마세요.
 2-1. search_welfare/search_finance 같은 정부API 도구로 검색했는데 결과가 없다면, 곧바로 배경지식으로
@@ -967,11 +996,24 @@ app.post("/api/agent/ask", async (req, res) => {
       items: lastItems,
       // 답변이 "찾아보기 화면에서 계산기/추천을 써보라"고 안내하는 경우, 말로만 하지 말고
       // 실제로 그 화면을 바로 열어주는 버튼을 보여줄 수 있게 신호를 같이 준다.
-      suggestedTool: bodyPart.includes("계산기")
-        ? "property-calc"
-        : bodyPart.includes("전세보증 맞춤 추천")
-        ? "jeonse-recommend"
-        : null,
+      // 프롬프트로 "용도 미확정 시엔 문구를 쓰지 말라"고 지시해도 100% 지켜진다는 보장이 없어,
+      // 여러 대출 용도(디딤돌/전세/생계/창업/학자금)를 나열하며 "어떤 용도세요?"라고 되묻는 것으로
+      // 보이는 답변이면(아직 용도가 안 정해진 상태) 방어적으로 버튼을 억제한다.
+      suggestedTool: (() => {
+        const purposeCategories = [
+          /주택구입자금|주택담보대출|디딤돌/, // 이 셋은 같은 "주택구입" 목적이라 하나로 묶어서 센다
+          /전세자금대출/,
+          /생계자금/,
+          /창업자금/,
+          /학자금/,
+        ];
+        const matchedCategoryCount = purposeCategories.filter((re) => re.test(bodyPart)).length;
+        const looksLikeClarifyingQuestion = matchedCategoryCount >= 2;
+        if (looksLikeClarifyingQuestion) return null;
+        if (bodyPart.includes("계산기")) return "property-calc";
+        if (bodyPart.includes("전세보증 맞춤 추천")) return "jeonse-recommend";
+        return null;
+      })(),
     });
   } catch (err) {
     console.error("에이전트 오류:", err);
@@ -1105,6 +1147,47 @@ app.get("/api/facts/fixed", (req, res) => {
   const q = req.query.q;
   const list = q ? searchFixedFacts(q) : FIXED_FACTS;
   res.json({ ok: true, facts: list.map(({ id, title, content, lastVerified }) => ({ id, title, content, lastVerified })) });
+});
+
+// =====================================================================
+// 행정안전부_대한민국 공공서비스(혜택) 정보 (정부24, data.go.kr 15113968)
+// ⚠️ 다른 API들과 게이트웨이가 다르다 (apis.data.go.kr가 아니라 api.odcloud.kr).
+// 중앙부처+지자체는 이미 기존 복지서비스 API로 다루고 있어서 겹치므로, 여기서는
+// "소관기관유형"으로 교육청·공공기관만 걸러서 보완용으로만 쓴다.
+// =====================================================================
+const GOV24_BASE_URL = process.env.GOV24_BASE_URL || "https://api.odcloud.kr/api";
+const GOV24_SERVICE_KEY = normalizeServiceKey(process.env.GOV24_SERVICE_KEY || SERVICE_KEY);
+
+async function toolSearchPublicBenefits({ keyword, orgType }) {
+  const url = new URL(GOV24_BASE_URL + "/gov24/v3/serviceList");
+  url.searchParams.set("serviceKey", GOV24_SERVICE_KEY);
+  url.searchParams.set("page", "1");
+  url.searchParams.set("perPage", "10");
+  if (keyword) url.searchParams.set("cond[서비스명::LIKE]", keyword);
+  // 기본값: 교육청+공공기관만 (기존 복지 API와 중복 방지). 명시적으로 orgType이 오면 그걸 우선한다.
+  url.searchParams.set("cond[소관기관유형::LIKE]", orgType || "교육청");
+  return fetchJsonOrXml(url.toString());
+}
+
+async function toolGetPublicBenefitDetail({ servId }) {
+  const url = new URL(GOV24_BASE_URL + "/gov24/v3/serviceDetail");
+  url.searchParams.set("serviceKey", GOV24_SERVICE_KEY);
+  url.searchParams.set("page", "1");
+  url.searchParams.set("perPage", "1");
+  url.searchParams.set("cond[서비스ID::EQ]", servId);
+  return fetchJsonOrXml(url.toString());
+}
+
+app.get("/api/welfare/gov24-list", async (req, res) => {
+  try {
+    const result = await toolSearchPublicBenefits({
+      keyword: req.query.keyword,
+      orgType: req.query.orgType,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "정부24 공공서비스 API 호출에 실패했습니다.", error: String(err) });
+  }
 });
 
 app.listen(PORT, () => {
