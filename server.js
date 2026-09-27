@@ -856,6 +856,11 @@ const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계�
 2-2. search_fixed_facts에서도 못 찾았고, 질문이 애초에 이 앱의 도구로 답하기 어려운 일반 상식/개념
    질문이라면, 그때만 당신이 원래 알고 있는 내용으로 답해도 됩니다. 단, 이 경우 반드시 "이 내용은 실제
    데이터베이스 조회 결과가 아니라 일반적으로 알려진 정보입니다"라고 답변 안에 명확히 구분해서 밝히세요.
+2-3. 사용자가 특정 지역(예: 서울)을 물어봤는데 도구 결과에 그 지역은 없고 다른 지역(예: 대전, 경기) 결과만
+   있다면, "서울은 못 찾았지만 정부24에서 확인한 결과 대전·경기는 이렇습니다"처럼 그 다른 지역 내용이
+   실제 도구 조회 결과라는 것을 명확히 밝히세요. 만약 그 다른 지역 사례조차 도구 결과가 아니라 당신이
+   원래 알던 일반적인 사업 설명이라면, 2-2처럼 "일반적으로 알려진 정보"라고 반드시 구분해서 밝히세요.
+   실제 조회 결과와 일반 지식을 한 답변에 섞을 때는 각각 어느 쪽인지 헷갈리지 않게 구분해야 합니다.
    정확한 세부 조건(정확한 소득기준, 최신 금액 등)까지는 확신하지 말고, 관련 기관에 직접 확인하라고 안내하세요.
 3. 도구 결과가 비어있거나 오류이면 (2-1의 일반 상식 답변이 아닌 이상) 지어내지 말고 실패했다고 말하세요.
 
@@ -945,6 +950,9 @@ app.post("/api/agent/ask", async (req, res) => {
 
     // 도구 호출 루프 (최대 4회 왕복) - 한 응답에 tool_use가 여러 개 있을 수 있어 전부 처리해야 한다.
     let lastItems = []; // 가장 최근 검색 결과 - 화면에 탭 가능한 버튼으로 보여줄 목록 (복지/금융 공통)
+    // 프롬프트로 "출처를 구분해서 밝히라"고 지시해도 100% 지켜진다는 보장이 없어, 실제로 도구가
+    // 뭐라도 찾았는지(복지/금융/정부24/고정DB 중 하나라도) 서버가 직접 추적해서 방어적으로 검증한다.
+    let anyRealDataFound = false;
     for (let i = 0; i < 4; i++) {
       const toolUses = response.content.filter((c) => c.type === "tool_use");
       if (toolUses.length === 0) break;
@@ -956,10 +964,26 @@ app.post("/api/agent/ask", async (req, res) => {
         const result = await executeTool(toolUse.name, toolUse.input);
         if (toolUse.name === "search_welfare") {
           const found = extractWelfareItemsFromSearchResult(result);
-          if (found.length > 0) lastItems = found;
+          if (found.length > 0) {
+            lastItems = found;
+            anyRealDataFound = true;
+          }
         } else if (toolUse.name === "search_finance_products") {
           const found = extractFinanceItemsFromSearchResult(result);
-          if (found.length > 0) lastItems = found;
+          if (found.length > 0) {
+            lastItems = found;
+            anyRealDataFound = true;
+          }
+        } else if (toolUse.name === "search_public_benefits") {
+          if (Array.isArray(result?.data) && result.data.length > 0) anyRealDataFound = true;
+        } else if (toolUse.name === "search_fixed_facts") {
+          if (result?.found) anyRealDataFound = true;
+        } else if (
+          toolUse.name === "get_didimdol_rate" ||
+          toolUse.name === "get_jeonse_bank_rate" ||
+          toolUse.name === "get_welfare_detail"
+        ) {
+          anyRealDataFound = true; // 이 도구들은 결과가 오면 곧 실제 데이터다
         }
         toolResults.push({
           type: "tool_result",
@@ -978,11 +1002,21 @@ app.post("/api/agent/ask", async (req, res) => {
       });
     }
 
-    const bodyPart = response.content
+    let bodyPart = response.content
       .filter((c) => c.type === "text")
       .map((c) => c.text)
       .join("\n")
       .trim();
+
+    // 안전장치: 도구가 실제로 뭔가를 찾은 게 하나도 없는데(anyRealDataFound=false),
+    // 답변 안에 출처 구분 문구("일반적으로 알려진 정보", "이 앱이 확인한", "정부24에서 확인" 등)가
+    // 전혀 없다면 - 프롬프트 지시를 놓친 것으로 보고 방어적으로 주의문을 붙인다.
+    const hasSourceLabel = /일반적으로 알려진|이 앱이 확인한|정부24에서 확인|찾지 못했|확인이 더 필요/.test(bodyPart);
+    if (!anyRealDataFound && !hasSourceLabel && bodyPart.length > 30) {
+      bodyPart +=
+        "\n\n⚠️ 참고: 이 답변 중 구체적인 수치나 절차는 실제 조회 결과가 아니라 일반적으로 알려진 내용을 " +
+        "바탕으로 한 것일 수 있습니다. 정확한 내용은 관할 기관에 직접 확인해 주세요.";
+    }
 
     // 추천 질문은 본문 생성과 같은 요청에 묶어서 지시하면(예: 특정 구분선 뒤에 붙이라는 식)
     // 다른 형식 지시(마크다운 금지 등)와 섞여서 가끔 빠뜨리는 것으로 확인되어, 아예 별도의
