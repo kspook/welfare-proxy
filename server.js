@@ -841,6 +841,11 @@ const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계�
 0-2. 이 앱에는 대화형 AI 화면 외에, 화면 우측 상단 "찾아보기"로 들어가면 조건을 선택해서 직접 찾아보거나
    (복지), 전세보증 맞춤 추천/LTV·DTI·DSR 계산기 같은 것을 쓸 수 있는 화면(금융)이 따로 있습니다.
    복지 답변 끝에는 "찾아보기 화면에서 조건별로 더 자세히 검색할 수 있다"고 안내하세요.
+   ⚠️ 특히 복지 검색 결과가 전세자금·주택자금·임대료 이자지원처럼 "대출/금융"과 관련된 내용이면,
+   그냥 찾아보기 화면 안내로 끝내지 말고 "이 복지사업과 별개로, 실제 은행 전세자금대출 금리나
+   전세보증 맞춤 추천도 궁금하시면 이 앱의 금융 메뉴에서 확인할 수 있다"처럼 구체적으로 연결해서
+   제안하세요. 정부 복지 정보만으로는 알 수 없는(그 복지사업이 이자를 지원해주는 대출 자체의 실제
+   금리·한도 비교 같은) 부분을 이 앱이 추가로 보완해준다는 게 이 앱의 핵심 가치입니다.
    ⚠️ 중요: "LTV·DTI·DSR 계산기"라는 문구는 사용자가 물어본 게 "주택구입/주택담보대출"이라고
    이미 명확한 경우에만 쓰세요. "대출한도 알려줘"처럼 용도가 아직 안 정해져서 먼저 "주택구입자금인지
    전세자금인지 생계자금인지" 같은 확인 질문을 하는 중이라면, 그 확인 질문 답변 안에서는 이 문구를
@@ -1248,6 +1253,28 @@ app.get("/api/welfare/gov24-list", async (req, res) => {
     res.json(result);
   } catch (err) {
     res.status(502).json({ ok: false, message: "정부24 공공서비스 API 호출에 실패했습니다.", error: String(err) });
+  }
+});
+
+// 최근 1개월(기본값) 이내에 등록되었거나 수정된 정부24 공공서비스(교육청/공공기관 중심).
+// ⚠️ 기존 복지로(중앙부처/지자체) API에 같은 날짜 필드가 있는지는 아직 확인 전이라, 우선
+// 정부24 카탈로그만 대상으로 한다.
+app.get("/api/welfare/gov24-recent", async (req, res) => {
+  try {
+    const days = parseInt(req.query.days, 10) || 30;
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    const url = new URL(GOV24_BASE_URL + "/gov24/v3/serviceList");
+    url.searchParams.set("serviceKey", GOV24_SERVICE_KEY);
+    url.searchParams.set("page", "1");
+    url.searchParams.set("perPage", "20");
+    url.searchParams.set(`cond[수정일시::GTE]`, since);
+    if (req.query.orgType) url.searchParams.set("cond[소관기관유형::LIKE]", req.query.orgType);
+
+    const result = await fetchJsonOrXml(url.toString());
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "정부24 최근 갱신 서비스 조회에 실패했습니다.", error: String(err) });
   }
 });
 
