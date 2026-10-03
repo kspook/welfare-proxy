@@ -1112,16 +1112,31 @@ app.post("/api/agent/ask", async (req, res) => {
           "그 상위 시/도(예: 서울특별시, 경기도) 전체의 관련 정보도 확인하겠냐는 질문으로 만들어라.",
         messages: [{ role: "user", content: `질문: ${question}\n\n답변: ${bodyPart}` }],
       }),
-      bodyPart.length > 120
+      bodyPart.length > 120 || lastItems.length > 0
         ? anthropic.messages.create({
             model,
             max_tokens: 400,
             system:
-              "아래 답변을 한국어로 최대 5줄로 요약해라. 한 줄은 한두 문장으로 짧게. 가장 중요한 결론과 " +
-              "핵심 조건·금액·연락처를 먼저 쓰고, 원문에 없는 내용은 절대 추가하지 마라. 숫자와 조건은 원문 그대로 써라. " +
-              "원문에 '일반적으로 알려진 정보', '이 앱이 확인한 정보' 같은 출처 구분이나 '확인이 필요하다'는 " +
-              "주의가 있으면 요약에도 한 줄로 남겨라. 마크다운·번호·이모지 없이 줄바꿈으로만 구분하고 그 외 말은 쓰지 마라.",
-            messages: [{ role: "user", content: bodyPart }],
+              "시각장애인이 가장 먼저 듣게 될 '핵심 요약'을 만들어라. 아래 형식을 반드시 지켜라.\n" +
+              "1줄: 조회된 항목 수와 대표 항목이 주어졌으면 '조회된 N건 중 대표로 A, B 등이 있습니다.' 형태로 써라 " +
+              "(대표 항목은 제목 그대로 최대 2개). 항목 정보가 없으면 질문에 대한 한 줄 결론을 써라.\n" +
+              "2~3줄: 가장 중요한 핵심 결과 한두 가지만(대상, 금액·금리, 연락처 중 핵심). 한 줄은 한 문장, 40자 안팎으로 짧게.\n" +
+              "4줄(해당될 때만): 원문에 '일반적으로 알려진 정보', '이 앱이 확인한', '확인이 필요하다' 같은 출처 구분이나 " +
+              "주의가 있으면 그 취지를 한 줄로 남겨라.\n" +
+              "원문에 없는 내용은 절대 추가하지 말고 숫자·조건은 원문 그대로 써라. '자세한 내용은 ~ 확인하세요' 같은 " +
+              "안내 문장은 쓰지 마라(앱이 따로 붙인다). 마크다운·번호·이모지 없이 줄바꿈으로만 구분하고 그 외 말은 쓰지 마라.",
+            messages: [
+              {
+                role: "user",
+                content:
+                  (lastItems.length > 0
+                    ? `조회된 항목 수: ${lastItems.length}건\n대표 항목: ${lastItems
+                        .slice(0, 3)
+                        .map((it) => it.title)
+                        .join(", ")}\n\n`
+                    : "") + `답변:\n${bodyPart}`,
+              },
+            ],
           })
         : Promise.resolve(null),
     ]);
@@ -1140,12 +1155,19 @@ app.post("/api/agent/ask", async (req, res) => {
     // 요약이 실패하거나 짧은 답변이면 summary는 비워두고, 앱이 전체 답변을 그대로 보여준다.
     let summary = null;
     if (summaryResult.status === "fulfilled" && summaryResult.value) {
+      // 모델이 안내 문장을 멋대로 붙여도 중복되지 않게 걸러내고, 마지막 안내 줄은 서버가 고정으로 붙인다.
       const lines = textOf(summaryResult.value)
         .split("\n")
         .map((x) => stripMarkdown(x).trim())
-        .filter(Boolean)
-        .slice(0, 5);
-      if (lines.length > 0) summary = lines.join("\n");
+        .filter((x) => x && !/자세히 보기|아래 항목/.test(x)) // 앱이 붙이는 안내 문장만 걸러낸다(주의 문구는 남김)
+        .slice(0, 4);
+      if (lines.length > 0) {
+        const closing =
+          lastItems.length > 0
+            ? "상세 내역은 아래 항목을 선택하거나 '자세히 보기'를 눌러 확인해 보세요."
+            : "상세 내용은 '자세히 보기'를 눌러 확인해 보세요.";
+        summary = [...lines, closing].join("\n");
+      }
     } else if (summaryResult.status === "rejected") {
       console.warn("요약 생성 실패(무시하고 진행):", summaryResult.reason?.message);
     }
