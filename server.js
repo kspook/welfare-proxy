@@ -841,11 +841,13 @@ const AGENT_SYSTEM_PROMPT = `당신은 시각장애인·고령자 등 취약계�
 0-2. 이 앱에는 대화형 AI 화면 외에, 화면 우측 상단 "찾아보기"로 들어가면 조건을 선택해서 직접 찾아보거나
    (복지), 전세보증 맞춤 추천/LTV·DTI·DSR 계산기 같은 것을 쓸 수 있는 화면(금융)이 따로 있습니다.
    복지 답변 끝에는 "찾아보기 화면에서 조건별로 더 자세히 검색할 수 있다"고 안내하세요.
-   ⚠️ 특히 복지 검색 결과가 전세자금·주택자금·임대료 이자지원처럼 "대출/금융"과 관련된 내용이면,
-   그냥 찾아보기 화면 안내로 끝내지 말고 "이 복지사업과 별개로, 실제 은행 전세자금대출 금리나
-   전세보증 맞춤 추천도 궁금하시면 이 앱의 금융 메뉴에서 확인할 수 있다"처럼 구체적으로 연결해서
-   제안하세요. 정부 복지 정보만으로는 알 수 없는(그 복지사업이 이자를 지원해주는 대출 자체의 실제
-   금리·한도 비교 같은) 부분을 이 앱이 추가로 보완해준다는 게 이 앱의 핵심 가치입니다.
+   ⚠️ 특히 복지 검색 결과 제목이나 내용에 "대여", "융자", "대출", "이자지원"처럼 사실상 대출 성격이
+   있는 사업이면(예: 장애인 자립자금 대여, 전세자금 이자지원 등 종류를 가리지 않음), 그냥 찾아보기
+   화면 안내로 끝내지 말고 "이 복지사업과 별개로, 비슷한 목적의 서민금융 대출상품도 궁금하시면 이 앱의
+   금융 메뉴(서민금융 상품 검색)에서 확인할 수 있다"처럼 구체적으로 연결해서 제안하세요. 가능하면
+   search_finance_products도 실제로 호출해서 비슷한 용도의 실제 상품이 있는지 같이 찾아보고, 있으면
+   답변에 포함하세요. 정부 복지 정보만으로는 알 수 없는(그 대여사업과 비슷한 목적의 시중 서민금융
+   상품 금리·한도 비교 같은) 부분을 이 앱이 추가로 보완해준다는 게 이 앱의 핵심 가치입니다.
    ⚠️ 중요: "LTV·DTI·DSR 계산기"라는 문구는 사용자가 물어본 게 "주택구입/주택담보대출"이라고
    이미 명확한 경우에만 쓰세요. "대출한도 알려줘"처럼 용도가 아직 안 정해져서 먼저 "주택구입자금인지
    전세자금인지 생계자금인지" 같은 확인 질문을 하는 중이라면, 그 확인 질문 답변 안에서는 이 문구를
@@ -896,6 +898,71 @@ function stripMarkdown(s) {
     .replace(/`([^`]+)`/g, "$1")
     .trim();
 }
+
+// =====================================================================
+// 데이터소스 사용 로그 - 앱이 말하는 "3가지 데이터"(정부DB / 자체DB / 일반지식)가 실제로
+// 의도대로 쓰이는지 매일 확인하기 위한 것. Render 무료 플랜은 서버가 재시작되면 메모리가
+// 초기화되므로 "서버가 켜져있는 동안의 기록"이다. 개인정보 보호를 위해 질문은 앞 60자만 남긴다.
+// =====================================================================
+function kstDateKey(ms) {
+  return new Date(ms + 9 * 60 * 60 * 1000).toISOString().slice(0, 10); // 한국시간 기준 YYYY-MM-DD
+}
+const dataSourceLog = [];
+const MAX_LOG_SIZE = 2000;
+
+function logDataSourceUsage(entry) {
+  const now = Date.now();
+  dataSourceLog.push({
+    ts: now,
+    dateKey: kstDateKey(now),
+    questionPreview: String(entry.question || "").slice(0, 60),
+    govDbUsed: entry.govDbUsed,
+    ownDbUsed: entry.ownDbUsed,
+    generalKnowledgeUsed: entry.generalKnowledgeUsed,
+    crossReferenced: entry.crossReferenced,
+    toolsUsed: entry.toolsUsed,
+    suggestedTool: entry.suggestedTool,
+  });
+  if (dataSourceLog.length > MAX_LOG_SIZE) dataSourceLog.shift();
+}
+
+function buildDailyLogText(dateKey) {
+  const day = dataSourceLog.filter((e) => e.dateKey === dateKey);
+  const count = (fn) => day.filter(fn).length;
+  const lines = [
+    `=== 배리어프리 생활 에이전트 - 데이터소스 사용 로그 (${dateKey}, 한국시간) ===`,
+    "",
+    `총 질문 수: ${day.length}건`,
+    `- 정부DB(실시간 API) 사용: ${count((e) => e.govDbUsed)}건`,
+    `- 자체DB(고정정보·계산기·전세추천 연결) 사용: ${count((e) => e.ownDbUsed)}건`,
+    `- 일반지식(Claude 배경지식) 사용: ${count((e) => e.generalKnowledgeUsed)}건`,
+    `- 복지↔금융 교차연결 발생: ${count((e) => e.crossReferenced)}건`,
+    "",
+    "--- 상세 내역 ---",
+  ];
+  if (day.length === 0) lines.push("(이 날짜 기록이 없습니다. 서버가 재시작되어 이전 기록이 초기화됐을 수 있습니다.)");
+  day.forEach((e, i) => {
+    const time = new Date(e.ts).toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" });
+    const sources = [e.govDbUsed && "정부DB", e.ownDbUsed && "자체DB", e.generalKnowledgeUsed && "일반지식"].filter(Boolean).join("+");
+    lines.push(
+      `${i + 1}. [${time}] "${e.questionPreview}" → ${sources || "(분류없음)"}` +
+        `${e.crossReferenced ? " · 교차연결O" : ""}${e.suggestedTool ? ` · 바로가기(${e.suggestedTool})` : ""}` +
+        `${e.toolsUsed?.length ? ` · 도구:${e.toolsUsed.join(",")}` : ""}`
+    );
+  });
+  return lines.join("\n");
+}
+
+// 텍스트 파일로 내려받는다. 질문 앞부분이 들어있어 개인정보가 섞일 수 있으므로
+// ADMIN_LOG_KEY 환경변수를 정하고 ?key=값 을 붙여야만 열린다 (환경변수가 없으면 닫혀 있음).
+app.get("/api/admin/daily-log", (req, res) => {
+  const adminKey = process.env.ADMIN_LOG_KEY;
+  if (!adminKey || req.query.key !== adminKey) return res.status(403).send("접근할 수 없습니다.");
+  const dateKey = req.query.date || kstDateKey(Date.now());
+  res.setHeader("Content-Type", "text/plain; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="data-source-log-${dateKey}.txt"`);
+  res.send(buildDailyLogText(dateKey));
+});
 
 app.post("/api/agent/ask", async (req, res) => {
   if (!anthropic) {
@@ -957,7 +1024,9 @@ app.post("/api/agent/ask", async (req, res) => {
     let lastItems = []; // 가장 최근 검색 결과 - 화면에 탭 가능한 버튼으로 보여줄 목록 (복지/금융 공통)
     // 프롬프트로 "출처를 구분해서 밝히라"고 지시해도 100% 지켜진다는 보장이 없어, 실제로 도구가
     // 뭐라도 찾았는지(복지/금융/정부24/고정DB 중 하나라도) 서버가 직접 추적해서 방어적으로 검증한다.
-    let anyRealDataFound = false;
+    let govDbUsed = false; // 정부DB(실시간 API)
+    let ownDbUsed = false; // 자체DB(고정정보/계산기·추천 연결)
+    const usedToolNames = [];
     for (let i = 0; i < 4; i++) {
       const toolUses = response.content.filter((c) => c.type === "tool_use");
       if (toolUses.length === 0) break;
@@ -967,28 +1036,29 @@ app.post("/api/agent/ask", async (req, res) => {
       const toolResults = [];
       for (const toolUse of toolUses) {
         const result = await executeTool(toolUse.name, toolUse.input);
+        usedToolNames.push(toolUse.name);
         if (toolUse.name === "search_welfare") {
           const found = extractWelfareItemsFromSearchResult(result);
           if (found.length > 0) {
             lastItems = found;
-            anyRealDataFound = true;
+            govDbUsed = true;
           }
         } else if (toolUse.name === "search_finance_products") {
           const found = extractFinanceItemsFromSearchResult(result);
           if (found.length > 0) {
             lastItems = found;
-            anyRealDataFound = true;
+            govDbUsed = true;
           }
         } else if (toolUse.name === "search_public_benefits") {
-          if (Array.isArray(result?.data) && result.data.length > 0) anyRealDataFound = true;
+          if (Array.isArray(result?.data) && result.data.length > 0) govDbUsed = true;
         } else if (toolUse.name === "search_fixed_facts") {
-          if (result?.found) anyRealDataFound = true;
+          if (result?.found) ownDbUsed = true; // 자체DB(고정정보) 히트
         } else if (
           toolUse.name === "get_didimdol_rate" ||
           toolUse.name === "get_jeonse_bank_rate" ||
           toolUse.name === "get_welfare_detail"
         ) {
-          anyRealDataFound = true; // 이 도구들은 결과가 오면 곧 실제 데이터다
+          govDbUsed = true; // 이 도구들은 결과가 오면 곧 실제 정부 데이터다
         }
         toolResults.push({
           type: "tool_result",
@@ -1013,11 +1083,12 @@ app.post("/api/agent/ask", async (req, res) => {
       .join("\n")
       .trim();
 
-    // 안전장치: 도구가 실제로 뭔가를 찾은 게 하나도 없는데(anyRealDataFound=false),
+    // 안전장치: 도구가 실제로 뭔가를 찾은 게 하나도 없는데(정부DB도 자체DB도 히트 안 함),
     // 답변 안에 출처 구분 문구("일반적으로 알려진 정보", "이 앱이 확인한", "정부24에서 확인" 등)가
     // 전혀 없다면 - 프롬프트 지시를 놓친 것으로 보고 방어적으로 주의문을 붙인다.
     const hasSourceLabel = /일반적으로 알려진|이 앱이 확인한|정부24에서 확인|찾지 못했|확인이 더 필요/.test(bodyPart);
-    if (!anyRealDataFound && !hasSourceLabel && bodyPart.length > 30) {
+    const generalKnowledgeUsed = !govDbUsed && !ownDbUsed;
+    if (generalKnowledgeUsed && !hasSourceLabel && bodyPart.length > 30) {
       bodyPart +=
         "\n\n⚠️ 참고: 이 답변 중 구체적인 수치나 절차는 실제 조회 결과가 아니라 일반적으로 알려진 내용을 " +
         "바탕으로 한 것일 수 있습니다. 정확한 내용은 관할 기관에 직접 확인해 주세요.";
@@ -1026,9 +1097,11 @@ app.post("/api/agent/ask", async (req, res) => {
     // 추천 질문은 본문 생성과 같은 요청에 묶어서 지시하면(예: 특정 구분선 뒤에 붙이라는 식)
     // 다른 형식 지시(마크다운 금지 등)와 섞여서 가끔 빠뜨리는 것으로 확인되어, 아예 별도의
     // 짧고 단순한 요청으로 분리했다 - 이쪽이 훨씬 안정적으로 매번 나온다.
-    let followups = [];
-    try {
-      const followupRes = await anthropic.messages.create({
+    // 추천 질문 + 5줄 요약을 각각 별도의 짧은 요청으로 만들되, 동시에 실행해서 대기시간을 늘리지 않는다.
+    // (시각장애인이 먼저 짧은 요약만 듣고, 필요하면 전체를 펼쳐 보게 하기 위함)
+    const textOf = (r) => r.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+    const [followupResult, summaryResult] = await Promise.allSettled([
+      anthropic.messages.create({
         model,
         max_tokens: 200,
         system:
@@ -1038,48 +1111,82 @@ app.post("/api/agent/ask", async (req, res) => {
           "만약 이번 질문이 특정 시/군/구(예: 강남구, 수원시)에 관한 것이었다면, 두 질문 중 하나는 반드시 " +
           "그 상위 시/도(예: 서울특별시, 경기도) 전체의 관련 정보도 확인하겠냐는 질문으로 만들어라.",
         messages: [{ role: "user", content: `질문: ${question}\n\n답변: ${bodyPart}` }],
-      });
-      followups = followupRes.content
-        .filter((c) => c.type === "text")
-        .map((c) => c.text)
-        .join("\n")
+      }),
+      bodyPart.length > 120
+        ? anthropic.messages.create({
+            model,
+            max_tokens: 400,
+            system:
+              "아래 답변을 한국어로 최대 5줄로 요약해라. 한 줄은 한두 문장으로 짧게. 가장 중요한 결론과 " +
+              "핵심 조건·금액·연락처를 먼저 쓰고, 원문에 없는 내용은 절대 추가하지 마라. 숫자와 조건은 원문 그대로 써라. " +
+              "원문에 '일반적으로 알려진 정보', '이 앱이 확인한 정보' 같은 출처 구분이나 '확인이 필요하다'는 " +
+              "주의가 있으면 요약에도 한 줄로 남겨라. 마크다운·번호·이모지 없이 줄바꿈으로만 구분하고 그 외 말은 쓰지 마라.",
+            messages: [{ role: "user", content: bodyPart }],
+          })
+        : Promise.resolve(null),
+    ]);
+
+    let followups = [];
+    if (followupResult.status === "fulfilled") {
+      followups = textOf(followupResult.value)
         .split("\n")
-        .map((s) => s.replace(/^[-•\d.\s]+/, "").trim())
+        .map((x) => x.replace(/^[-•\d.\s]+/, "").trim())
         .filter(Boolean)
         .slice(0, 2);
-    } catch (err) {
-      console.warn("추천 질문 생성 실패(무시하고 진행):", err.message);
+    } else {
+      console.warn("추천 질문 생성 실패(무시하고 진행):", followupResult.reason?.message);
+    }
+
+    // 요약이 실패하거나 짧은 답변이면 summary는 비워두고, 앱이 전체 답변을 그대로 보여준다.
+    let summary = null;
+    if (summaryResult.status === "fulfilled" && summaryResult.value) {
+      const lines = textOf(summaryResult.value)
+        .split("\n")
+        .map((x) => stripMarkdown(x).trim())
+        .filter(Boolean)
+        .slice(0, 5);
+      if (lines.length > 0) summary = lines.join("\n");
+    } else if (summaryResult.status === "rejected") {
+      console.warn("요약 생성 실패(무시하고 진행):", summaryResult.reason?.message);
     }
 
     // 토큰 한도로 답변이 중간에 끊긴 경우, 사용자가 "왜 갑자기 끝났지"라고 오해하지 않도록 알려준다.
     const truncatedNote =
       response.stop_reason === "max_tokens" ? "\n\n(답변이 길어서 여기서 요약을 마칩니다. 더 필요하면 구체적으로 다시 물어봐 주세요.)" : "";
 
+    const suggestedTool = (() => {
+      // 프롬프트로 "용도 미확정 시엔 문구를 쓰지 말라"고 지시해도 100% 지켜진다는 보장이 없어,
+      // 여러 대출 용도를 나열하며 "어떤 용도세요?"라고 되묻는 답변이면 방어적으로 버튼을 억제한다.
+      const purposeCategories = [/주택구입자금|주택담보대출|디딤돌/, /전세자금대출/, /생계자금/, /창업자금/, /학자금/];
+      if (purposeCategories.filter((re) => re.test(bodyPart)).length >= 2) return null;
+      if (bodyPart.includes("계산기")) return "property-calc";
+      if (bodyPart.includes("전세보증 맞춤 추천")) return "jeonse-recommend";
+      return null;
+    })();
+
+    // 이 앱이 직접 만든 도구(계산기/전세추천)로 연결했으면 "자체DB" 활용으로 센다.
+    if (suggestedTool) ownDbUsed = true;
+    // 복지 도구와 금융 도구가 한 답변에서 같이 쓰였으면 "복지↔금융 교차연결"이 일어난 것으로 본다.
+    const usedFinance = ["search_finance_products", "get_jeonse_bank_rate", "get_didimdol_rate"].some((t) => usedToolNames.includes(t));
+    const crossReferenced = usedToolNames.includes("search_welfare") && usedFinance;
+
+    logDataSourceUsage({
+      question,
+      govDbUsed,
+      ownDbUsed,
+      generalKnowledgeUsed: !govDbUsed && !ownDbUsed,
+      crossReferenced,
+      toolsUsed: usedToolNames,
+      suggestedTool,
+    });
+
     res.json({
       ok: true,
       answer: (stripMarkdown(bodyPart) || "답변을 만들지 못했습니다. 다시 질문해 주세요.") + truncatedNote,
+      summary, // 5줄 이내 요약 (없으면 null)
       followups: followups.map(stripMarkdown),
       items: lastItems,
-      // 답변이 "찾아보기 화면에서 계산기/추천을 써보라"고 안내하는 경우, 말로만 하지 말고
-      // 실제로 그 화면을 바로 열어주는 버튼을 보여줄 수 있게 신호를 같이 준다.
-      // 프롬프트로 "용도 미확정 시엔 문구를 쓰지 말라"고 지시해도 100% 지켜진다는 보장이 없어,
-      // 여러 대출 용도(디딤돌/전세/생계/창업/학자금)를 나열하며 "어떤 용도세요?"라고 되묻는 것으로
-      // 보이는 답변이면(아직 용도가 안 정해진 상태) 방어적으로 버튼을 억제한다.
-      suggestedTool: (() => {
-        const purposeCategories = [
-          /주택구입자금|주택담보대출|디딤돌/, // 이 셋은 같은 "주택구입" 목적이라 하나로 묶어서 센다
-          /전세자금대출/,
-          /생계자금/,
-          /창업자금/,
-          /학자금/,
-        ];
-        const matchedCategoryCount = purposeCategories.filter((re) => re.test(bodyPart)).length;
-        const looksLikeClarifyingQuestion = matchedCategoryCount >= 2;
-        if (looksLikeClarifyingQuestion) return null;
-        if (bodyPart.includes("계산기")) return "property-calc";
-        if (bodyPart.includes("전세보증 맞춤 추천")) return "jeonse-recommend";
-        return null;
-      })(),
+      suggestedTool,
     });
   } catch (err) {
     console.error("에이전트 오류:", err);
@@ -1259,6 +1366,18 @@ app.get("/api/welfare/gov24-list", async (req, res) => {
 // 최근 1개월(기본값) 이내에 등록되었거나 수정된 정부24 공공서비스(교육청/공공기관 중심).
 // ⚠️ 기존 복지로(중앙부처/지자체) API에 같은 날짜 필드가 있는지는 아직 확인 전이라, 우선
 // 정부24 카탈로그만 대상으로 한다.
+app.get("/api/welfare/gov24-detail", async (req, res) => {
+  try {
+    if (!req.query.servId) {
+      return res.status(400).json({ ok: false, message: "servId가 필요합니다." });
+    }
+    const result = await toolGetPublicBenefitDetail({ servId: req.query.servId });
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ ok: false, message: "정부24 공공서비스 상세조회에 실패했습니다.", error: String(err) });
+  }
+});
+
 app.get("/api/welfare/gov24-recent", async (req, res) => {
   try {
     const days = parseInt(req.query.days, 10) || 30;
