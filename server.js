@@ -1419,6 +1419,94 @@ app.get("/api/welfare/gov24-recent", async (req, res) => {
   }
 });
 
+// =====================================================================
+// 쉬운 설명 카드 - 복지 상세 내용을 "한 장씩 넘기는 쉬운 말 카드"로 풀어준다 (앱에서 애니메이션+음성으로 재생).
+// 원문(상세 내용)에 있는 사실만 쓰게 하고, 서버가 한 번 더 검증한다:
+//  - 카드에 들어간 숫자가 원문에 없으면 지어낸 것으로 보고 그 카드를 버린다.
+//  - 마지막 "꼭 확인하세요" 카드는 AI가 아니라 서버가 고정 문구로 붙인다.
+// =====================================================================
+const explainCache = new Map(); // 같은 상세 내용은 다시 만들지 않는다 (비용·대기시간 절약)
+
+function numberTokens(str) {
+  return (String(str).replace(/,/g, "").match(/\d+(\.\d+)?/g) || []);
+}
+
+app.post("/api/explain", async (req, res) => {
+  if (!anthropic) return res.status(500).json({ ok: false, message: "AI 기능을 쓸 수 없습니다." });
+  const title = String(req.body?.title || "").slice(0, 200);
+  const sourceText = String(req.body?.text || "").trim().slice(0, 6000);
+  if (sourceText.length < 20) return res.status(400).json({ ok: false, message: "설명할 상세 내용이 부족합니다." });
+
+  const kind = req.body?.kind === "finance" ? "finance" : "welfare";
+  const key = require("crypto").createHash("sha1").update(kind + "\n" + title + "\n" + sourceText).digest("hex");
+  if (explainCache.has(key)) return res.json({ ok: true, cards: explainCache.get(key), cached: true });
+
+  try {
+    const response = await anthropic.messages.create({
+      model: process.env.AGENT_MODEL || "claude-sonnet-5",
+      max_tokens: 1200,
+      system:
+        "너는 " + (kind === "finance" ? "금융 상품·금리 정보" : "복지 서비스 설명") +
+        "을 시각장애인·고령자·지적장애인도 이해할 수 있게 '한 장씩 넘기는 카드'로 바꾸는 도우미다.\n" +
+        "[원문]에 있는 내용만 사용하라. 원문에 없는 금액·기한·조건·전화번호·사이트는 절대 만들지 마라. " +
+        "숫자·금액·날짜·전화번호는 원문 표기 그대로 써라. 단위를 바꾸거나 환산하지 마라" +
+        "(예: 원문이 1억5천만원이면 1.5억원이라고 바꾸지 말고 1억5천만원 그대로).\n" +
+        "출력은 JSON 하나만: {\"cards\":[{\"icon\":\"이모지 1개\",\"heading\":\"짧은 제목(10자 이내)\",\"text\":\"1~2문장, 쉬운 말\"}]}\n" +
+        (kind === "finance"
+          ? "카드는 3~6장이고 순서는 (1)이 상품은 무엇인가요 (2)누가 이용할 수 있나요 (3)금리와 한도는 어떻게 되나요 " +
+            "(4)어떻게 신청하나요 (5)어디에 물어보나요. 원문이 금리 통계·평균처럼 상품 설명이 아니면, 원문이 말하는 " +
+            "수치가 무엇인지(예: 은행별 평균, 소득구간별)를 쉬운 말로 풀어 카드를 구성하라. 통계나 평균 수치를 " +
+            "'내가 받는 금리'처럼 단정해서 쓰지 마라. 원문에 '보장하지 않는다', '참고용', '평균', '변동' 같은 " +
+            "주의가 있으면 반드시 카드 한 장에 쉬운 말로 남겨라.\n"
+          : "카드는 3~6장이고 순서는 (1)이 서비스는 무엇인가요 (2)누가 받을 수 있나요 (3)무엇을 받나요 " +
+            "(4)어떻게 신청하나요 (5)어디에 물어보나요.\n") +
+        "원문에 해당 정보가 없으면 그 카드는 만들지 마라. 카드 하나의 text는 70자 안팎으로 짧게. " +
+        "어려운 행정용어·금융용어·한자어는 뜻이 바뀌지 않게 쉬운 말로 풀어라. 마크다운 금지. JSON 외의 다른 글은 쓰지 마라.",
+      messages: [{ role: "user", content: `${kind === "finance" ? "상품·항목 이름" : "서비스 이름"}: ${title}\n\n[원문]\n${sourceText}` }],
+    });
+    let raw = response.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+    raw = raw.replace(/```json|```/g, "").trim();
+    const i = raw.indexOf("{");
+    const j = raw.lastIndexOf("}");
+    const parsed = JSON.parse(raw.slice(i, j + 1));
+
+    const sourceNumbers = new Set(numberTokens(sourceText + " " + title));
+    let dropped = 0;
+    const cards = (Array.isArray(parsed.cards) ? parsed.cards : [])
+      .filter((c) => c && typeof c.heading === "string" && typeof c.text === "string")
+      .map((c) => ({
+        icon: typeof c.icon === "string" && c.icon.length <= 4 ? c.icon : "📌",
+        heading: stripMarkdown(c.heading).slice(0, 20),
+        text: stripMarkdown(c.text).slice(0, 220),
+      }))
+      .filter((c) => {
+        const ok = numberTokens(c.heading + " " + c.text).every((n) => sourceNumbers.has(n));
+        if (!ok) dropped++;
+        return ok;
+      })
+      .slice(0, 6);
+    if (dropped > 0) console.warn(`[쉬운설명] 원문에 없는 숫자가 있는 카드 ${dropped}장을 버렸습니다: ${title}`);
+
+    if (cards.length < 2) {
+      return res.status(502).json({ ok: false, message: "쉬운 설명을 안전하게 만들지 못했습니다. 상세 내용을 직접 확인해 주세요." });
+    }
+    cards.push({
+      icon: "⚠️",
+      heading: "꼭 확인하세요",
+      text:
+        kind === "finance"
+          ? "금리와 한도는 사람마다, 때마다 달라질 수 있어요. 신청하기 전에 은행이나 해당 기관에서 꼭 확인해 주세요."
+          : "조건과 금액은 바뀔 수 있어요. 신청하기 전에 담당 기관에 한 번 더 확인해 주세요.",
+    });
+    if (explainCache.size > 200) explainCache.delete(explainCache.keys().next().value);
+    explainCache.set(key, cards);
+    res.json({ ok: true, cards });
+  } catch (err) {
+    console.error("쉬운 설명 생성 오류:", err);
+    res.status(502).json({ ok: false, message: "쉬운 설명을 만들지 못했습니다. 잠시 후 다시 시도해 주세요." });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`[welfare-proxy] http://localhost:${PORT} 에서 실행 중`);
   console.log(`[welfare-proxy] 데모 페이지: http://localhost:${PORT}/welfare_demo.html`);
