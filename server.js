@@ -689,6 +689,158 @@ function searchFixedFacts(query) {
   return FIXED_FACTS.filter((f) => f.keywords.some((k) => q.includes(k.toLowerCase())));
 }
 
+
+// =====================================================================
+// 복지 ↔ 금융 연결 DB (이 앱의 기본 사상)
+// 복지 정보를 조회하면 관련 금융 정보를, 금융 정보를 조회하면 관련 복지 정보를
+// "서버가 직접" 붙인다. AI가 프롬프트 지시를 놓쳐도 빠지지 않게 하기 위함.
+// - tool: 앱 안의 바로가기(property-calc=대출한도 계산기, jeonse-recommend=전세보증 추천)
+// - question: 누르면 AI에게 그대로 질문하는 문장(정부 DB를 다시 조회하게 됨)
+// 수치는 일부러 넣지 않는다(바뀔 수 있고, 수치는 정부 DB 조회 결과로만 안내).
+// =====================================================================
+const CROSS_LINKS = [
+  // ---------- 복지 → 금융 ----------
+  {
+    id: "w2f-jeonse",
+    direction: "welfare->finance",
+    keywords: ["전세", "월세", "보증금", "임대주택", "행복주택", "주거급여", "주거 지원", "주거지원", "청년 주거", "신혼부부 주거", "주거안정", "임차"],
+    title: "전세자금대출·보증기관 비교",
+    reason: "주거 관련 복지는 보증금 마련과 함께 보는 경우가 많습니다. 전세자금대출 금리와 보증기관(HF·HUG·SGI)을 비교해 볼 수 있습니다.",
+    tool: "jeonse-recommend",
+    question: "전세자금대출 금리와 보증기관을 비교해서 알려줘",
+  },
+  {
+    id: "w2f-home-buy",
+    direction: "welfare->finance",
+    keywords: ["내집마련", "내 집 마련", "주택구입", "주택 구입", "생애최초", "신혼부부", "디딤돌", "분양", "매매"],
+    title: "대출한도 계산기(LTV·DSR)와 디딤돌 대출 금리",
+    reason: "주택 구입 지원은 대출 한도(LTV·DTI·DSR 규제)에 따라 실제 가능 금액이 달라집니다.",
+    tool: "property-calc",
+    question: "디딤돌대출 금리와 대출 조건을 알려줘",
+  },
+  {
+    id: "w2f-low-income-loan",
+    direction: "welfare->finance",
+    keywords: ["저소득", "기초생활", "차상위", "긴급복지", "위기가구", "생계", "자립", "대여", "생활자금", "기초수급", "한부모", "장애인 자립", "자립금"],
+    title: "서민금융 상품(햇살론·소액생계대출 등)",
+    reason: "복지 지원만으로 부족할 때 쓸 수 있는 서민금융 상품이 있습니다. 대상과 조건은 정부 DB에서 다시 조회해 드립니다.",
+    question: "저소득층이 이용할 수 있는 서민금융 대출 상품을 알려줘",
+  },
+  {
+    id: "w2f-youth",
+    direction: "welfare->finance",
+    keywords: ["청년", "사회초년생", "취업준비", "구직", "대학생"],
+    title: "청년 예·적금과 저축 상품",
+    reason: "청년 지원 제도와 함께 이용하면 좋은 청년 대상 예·적금 상품을 비교해 볼 수 있습니다.",
+    question: "청년이 가입할 수 있는 적금 상품을 알려줘",
+  },
+  {
+    id: "w2f-senior",
+    direction: "welfare->finance",
+    keywords: ["어르신", "노인", "기초연금", "노령", "경로", "65세", "독거", "치매", "요양"],
+    title: "주택연금과 어르신 예·적금",
+    reason: "연금·노후 복지와 함께 집을 담보로 매달 연금을 받는 주택연금, 어르신 우대 예금을 같이 살펴볼 수 있습니다.",
+    question: "주택연금이 무엇이고 누가 받을 수 있는지 알려줘",
+  },
+  {
+    id: "w2f-student",
+    direction: "welfare->finance",
+    keywords: ["학자금", "장학", "등록금", "교육비", "교육급여", "교육복지"],
+    title: "학자금대출 안내",
+    reason: "장학·교육비 지원을 받아도 부족한 부분은 학자금대출로 채우는 경우가 있습니다.",
+    question: "학자금대출 종류와 조건을 알려줘",
+  },
+  {
+    id: "w2f-business",
+    direction: "welfare->finance",
+    keywords: ["창업", "소상공인", "자영업", "폐업", "사업자"],
+    title: "소상공인·창업 정책 대출",
+    reason: "창업·소상공인 지원은 정책자금 대출과 함께 안내되는 경우가 많습니다.",
+    question: "소상공인이나 창업자가 쓸 수 있는 정책자금 대출을 알려줘",
+  },
+  {
+    id: "w2f-family",
+    direction: "welfare->finance",
+    keywords: ["출산", "다자녀", "육아", "보육", "아동수당", "양육", "임산부", "신생아"],
+    title: "자녀 가구 주택·생활 대출 우대",
+    reason: "출산·다자녀 가구는 주택자금 대출에서 우대 조건이 있을 수 있습니다. 현재 조건은 정부 DB로 확인해 드립니다.",
+    tool: "property-calc",
+    question: "자녀가 있는 가구가 받을 수 있는 주택자금 대출 우대 조건을 알려줘",
+  },
+  {
+    id: "w2f-debt",
+    direction: "welfare->finance",
+    keywords: ["빚", "채무", "연체", "신용회복", "파산", "회생", "압류"],
+    title: "채무조정·신용회복 제도",
+    reason: "상환이 어려울 때 신용회복위원회 채무조정, 법원 개인회생 등 공적 제도가 있습니다. 대한법률구조공단(132) 상담도 가능합니다.",
+    question: "빚을 갚기 어려울 때 이용할 수 있는 신용회복 제도를 알려줘",
+  },
+  // ---------- 금융 → 복지 ----------
+  {
+    id: "f2w-housing",
+    direction: "finance->welfare",
+    keywords: ["전세", "월세", "버팀목", "디딤돌", "주택담보", "주택 구입", "LTV", "DSR", "보증료"],
+    title: "주거 관련 복지 지원",
+    reason: "대출 전에 받을 수 있는 주거급여·청년 월세 지원·임대주택 같은 복지 혜택이 있는지 먼저 확인해 보세요.",
+    question: "주거급여나 월세 지원 같은 주거 관련 복지 서비스를 알려줘",
+  },
+  {
+    id: "f2w-lowincome",
+    direction: "finance->welfare",
+    keywords: ["햇살론", "서민금융", "소액생계", "생계자금", "신용회복", "채무", "연체"],
+    title: "긴급복지·생계 지원",
+    reason: "대출보다 먼저 받을 수 있는 긴급복지지원, 생계·의료 지원 같은 복지 제도가 있는지 확인해 보세요.",
+    question: "긴급복지지원이나 생계 지원 같은 복지 서비스를 알려줘",
+  },
+  {
+    id: "f2w-senior",
+    direction: "finance->welfare",
+    keywords: ["주택연금", "연금", "노후", "어르신", "예금 우대"],
+    title: "어르신 복지 서비스",
+    reason: "기초연금, 노인 일자리, 돌봄 서비스 같은 어르신 복지를 함께 확인해 보세요.",
+    question: "어르신이 받을 수 있는 복지 서비스를 알려줘",
+  },
+  {
+    id: "f2w-youth",
+    direction: "finance->welfare",
+    keywords: ["청년", "적금", "사회초년생", "학자금"],
+    title: "청년·학생 복지 지원",
+    reason: "청년 지원 정책과 학생 지원(장학·교육비) 복지를 함께 확인해 보세요.",
+    question: "청년이 받을 수 있는 복지 서비스를 알려줘",
+  },
+  {
+    id: "f2w-business",
+    direction: "finance->welfare",
+    keywords: ["소상공인", "창업", "정책자금", "사업자"],
+    title: "소상공인·창업 지원사업",
+    reason: "대출 외에 정부가 지원하는 소상공인·창업 지원사업이 있는지 확인해 보세요.",
+    question: "소상공인이나 창업을 지원하는 정부 서비스를 알려줘",
+  },
+];
+
+// texts: 매칭에 쓸 문자열 배열(질문, 조회 항목 제목, 답변 등). 키워드 적중이 많은 순으로 최대 limit개.
+// 같은 도구/질문이 중복되지 않게 걸러내고, exclude에는 이미 질문 자체가 그 주제면 빼기 위한 id를 넣는다.
+function findCrossLinks(direction, texts, limit = 3) {
+  const hay = (texts || []).join(" ").toLowerCase();
+  const scored = CROSS_LINKS.filter((l) => l.direction === direction)
+    .map((l) => ({ l, score: l.keywords.filter((k) => hay.includes(k.toLowerCase())).length }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => ({ id: x.l.id, title: x.l.title, reason: x.l.reason, tool: x.l.tool || null, question: x.l.question }));
+  return scored;
+}
+
+// 응답 본문 끝에 붙일 안내문(앱 버전이 달라 버튼이 안 보여도 글로는 항상 나간다).
+function buildCrossLinkText(direction, links) {
+  if (!links || links.length === 0) return "";
+  const head =
+    direction === "welfare->finance"
+      ? "함께 보면 좋은 금융 정보 (이 앱이 확인한 연결 정보)"
+      : "함께 보면 좋은 복지 정보 (이 앱이 확인한 연결 정보)";
+  return "\n\n" + head + "\n" + links.map((l, i) => `${i + 1}. ${l.title}: ${l.reason}`).join("\n");
+}
+
 const TOOLS = [
   {
     name: "search_welfare",
@@ -922,6 +1074,7 @@ function logDataSourceUsage(entry) {
     crossReferenced: entry.crossReferenced,
     toolsUsed: entry.toolsUsed,
     suggestedTool: entry.suggestedTool,
+    crossLinkIds: entry.crossLinkIds || [],
   });
   if (dataSourceLog.length > MAX_LOG_SIZE) dataSourceLog.shift();
 }
@@ -946,7 +1099,7 @@ function buildDailyLogText(dateKey) {
     const sources = [e.govDbUsed && "정부DB", e.ownDbUsed && "자체DB", e.generalKnowledgeUsed && "일반지식"].filter(Boolean).join("+");
     lines.push(
       `${i + 1}. [${time}] "${e.questionPreview}" → ${sources || "(분류없음)"}` +
-        `${e.crossReferenced ? " · 교차연결O" : ""}${e.suggestedTool ? ` · 바로가기(${e.suggestedTool})` : ""}` +
+        `${e.crossReferenced ? " · 교차연결O" : ""}${e.suggestedTool ? ` · 바로가기(${e.suggestedTool})` : ""}${e.crossLinkIds?.length ? ` · 연결제안:${e.crossLinkIds.join(",")}` : ""}` +
         `${e.toolsUsed?.length ? ` · 도구:${e.toolsUsed.join(",")}` : ""}`
     );
   });
@@ -984,7 +1137,25 @@ app.post("/api/agent/ask", async (req, res) => {
     const [, scope, servId] = detailMatch;
     try {
       const raw = await toolGetWelfareDetail({ servId, scope });
-      return res.json({ ok: true, answer: formatWelfareDetailPlain(raw, scope), followups: [], items: [] });
+      const detailText = formatWelfareDetailPlain(raw, scope);
+      const detailLinks = findCrossLinks("welfare->finance", [detailText]);
+      logDataSourceUsage({
+        question: "(복지 상세조회) " + servId,
+        govDbUsed: true,
+        ownDbUsed: detailLinks.length > 0,
+        generalKnowledgeUsed: false,
+        crossReferenced: detailLinks.length > 0,
+        toolsUsed: ["get_welfare_detail"],
+        suggestedTool: null,
+        crossLinkIds: detailLinks.map((l) => l.id),
+      });
+      return res.json({
+        ok: true,
+        answer: detailText + buildCrossLinkText("welfare->finance", detailLinks),
+        followups: [],
+        items: [],
+        crossLinks: detailLinks,
+      });
     } catch (err) {
       console.error("상세조회 단축 경로 오류:", err);
       return res.status(502).json({ ok: false, message: "상세 정보를 불러오지 못했습니다. 잠시 후 다시 시도해 주세요." });
@@ -1094,6 +1265,29 @@ app.post("/api/agent/ask", async (req, res) => {
         "바탕으로 한 것일 수 있습니다. 정확한 내용은 관할 기관에 직접 확인해 주세요.";
     }
 
+    // ---- 복지↔금융 연결 강제 부착 (이 앱의 기본 사상) ----
+    // 복지 조회가 있었으면 금융 제안을, 금융 조회가 있었으면 복지 제안을 서버가 직접 붙인다.
+    // 질문 자체가 이미 그 주제(예: 전세 금리를 물었는데 전세 금융 제안)이면 중복이라 제외한다.
+    const welfareUsed = ["search_welfare", "get_welfare_detail", "search_public_benefits", "search_fixed_facts"].some((t) => usedToolNames.includes(t));
+    const financeUsedEarly = ["search_finance_products", "get_jeonse_bank_rate", "get_didimdol_rate"].some((t) => usedToolNames.includes(t));
+    const matchTexts = [question, ...lastItems.map((it) => it.title || ""), bodyPart];
+    let crossDirection = null;
+    let crossLinks = [];
+    if (welfareUsed) {
+      crossDirection = "welfare->finance";
+      crossLinks = findCrossLinks(crossDirection, matchTexts);
+    }
+    if (crossLinks.length === 0 && financeUsedEarly) {
+      crossDirection = "finance->welfare";
+      crossLinks = findCrossLinks(crossDirection, matchTexts);
+    }
+    // 답변에 이미 같은 제목의 안내가 있으면 중복이므로 제외
+    crossLinks = crossLinks.filter((l) => !bodyPart.includes(l.title) && l.question !== question);
+    if (crossLinks.length > 0) {
+      bodyPart += buildCrossLinkText(crossDirection, crossLinks);
+      ownDbUsed = true; // 연결 DB는 자체 DB다
+    }
+
     // 추천 질문은 본문 생성과 같은 요청에 묶어서 지시하면(예: 특정 구분선 뒤에 붙이라는 식)
     // 다른 형식 지시(마크다운 금지 등)와 섞여서 가끔 빠뜨리는 것으로 확인되어, 아예 별도의
     // 짧고 단순한 요청으로 분리했다 - 이쪽이 훨씬 안정적으로 매번 나온다.
@@ -1166,7 +1360,11 @@ app.post("/api/agent/ask", async (req, res) => {
           lastItems.length > 0
             ? "상세 내역은 아래 항목을 선택하거나 '자세히 보기'를 눌러 확인해 보세요."
             : "상세 내용은 '자세히 보기'를 눌러 확인해 보세요.";
-        summary = [...lines, closing].join("\n");
+        const crossLine =
+          crossLinks.length > 0
+            ? (crossDirection === "welfare->finance" ? "함께 볼 금융 정보: " : "함께 볼 복지 정보: ") + crossLinks.map((l) => l.title).join(", ")
+            : null;
+        summary = [...lines, ...(crossLine ? [crossLine] : []), closing].join("\n");
       }
     } else if (summaryResult.status === "rejected") {
       console.warn("요약 생성 실패(무시하고 진행):", summaryResult.reason?.message);
@@ -1190,7 +1388,7 @@ app.post("/api/agent/ask", async (req, res) => {
     if (suggestedTool) ownDbUsed = true;
     // 복지 도구와 금융 도구가 한 답변에서 같이 쓰였으면 "복지↔금융 교차연결"이 일어난 것으로 본다.
     const usedFinance = ["search_finance_products", "get_jeonse_bank_rate", "get_didimdol_rate"].some((t) => usedToolNames.includes(t));
-    const crossReferenced = usedToolNames.includes("search_welfare") && usedFinance;
+    const crossReferenced = (usedToolNames.includes("search_welfare") && usedFinance) || crossLinks.length > 0;
 
     logDataSourceUsage({
       question,
@@ -1200,6 +1398,7 @@ app.post("/api/agent/ask", async (req, res) => {
       crossReferenced,
       toolsUsed: usedToolNames,
       suggestedTool,
+      crossLinkIds: crossLinks.map((l) => l.id),
     });
 
     res.json({
@@ -1209,6 +1408,7 @@ app.post("/api/agent/ask", async (req, res) => {
       followups: followups.map(stripMarkdown),
       items: lastItems,
       suggestedTool,
+      crossLinks,
     });
   } catch (err) {
     console.error("에이전트 오류:", err);
